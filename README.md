@@ -71,18 +71,15 @@ hiçbir veri buluta gönderilmez.
 ### Kurulum
 
 ```bash
-1. Repoyu klonla
+# 1. Repoyu klonla
 git clone https://github.com/KOSMO471/AganBrowser.git
 cd AganBrowser
 
-2. Bir Ollama modeli indir (AI için)
+# 2. Bir Ollama modeli indir (AI için)
 ollama pull qwen2.5-coder:7b
 
-3. Derle
+# 3. Derle
 build.bat
-
-4. Çalıştır
-run.bat
 
 # 4. Çalıştır
 run.bat
