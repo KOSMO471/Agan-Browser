@@ -1,0 +1,110 @@
+# ===========================================
+# .NET / C# / WPF — AganBrowser
+# ===========================================
+
+# Derleme çıktıları
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+
+# Visual Studio / Rider / VS Code
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.rsuser
+
+# Derleme sonuçları
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+build/
+bld/
+[Oo]ut/
+[Pp]ublish/
+publish/
+*.publishproj
+
+# NuGet
+*.nupkg
+*.snupkg
+**/packages/*
+!**/packages/build/
+*.nuget.props
+*.nuget.targets
+project.lock.json
+project.fragment.lock.json
+artifacts/
+.nuget/
+
+# Test sonuçları
+[Tt]est[Rr]esult*/
+[Bb]uild[Ll]og.*
+*.trx
+*.coverage
+*.coveragexml
+coverage*.json
+coverage*.xml
+coverage*.info
+
+# OS dosyaları
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Geçici dosyalar
+*.tmp
+*.temp
+*.log
+*.bak
+*.swp
+*~
+
+# WebView2 kullanıcı verisi (uygulama AppData'ya yazsa da, kaza eseri repo'da oluşursa)
+WebView2Data/
+*.ldb
+*.sqlite
+
+# Kullanıcı verileri (uygulama zaten AppData'ya yazıyor ama yine de emniyet)
+session.json
+history.json
+bookmarks.json
+shortcuts.json
+passwords.dat
+
+# Rider / VS özel
+_ReSharper*/
+*.[Rr]e[Ss]harper
+*.DotSettings.user
+
+# Windows
+*.pdb
+*.ilk
+*.cache
+
+# NuGet sembolleri
+*.symbols.nupkg
+
+# Kullanıcıya özel yapılandırma
+appsettings.local.json
+appsettings.*.local.json
+.env
+.env.local
+
+# Ollama / model dosyaları (asla repo'ya girmemeli)
+*.gguf
+*.bin
+models/
+
+# ZIP / arşiv çıktıları (release için ayrıca yüklenir)
+*.zip
+*.7z
+*.rar
