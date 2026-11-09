@@ -148,6 +148,9 @@
                     <Button Content="+ Sekme" Click="NewTab_Click" ToolTip="Yeni Sekme"/>
                 </StackPanel>
                 <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                    <Button Content="🧠 Kişilik" Click="OpenPersonality_Click" ToolTip="Ağan'ın Kişiliğini Ayarla"/>
+                    <Button Content="🕶️ Gizli" Click="OpenIncognito_Click" ToolTip="Gizli Modda Yeni Sekme"/>
+                    <Button Content="🤖 Özetle" Click="SummarizePage_Click" ToolTip="Sayfayı Ağan'a özetlet"/>
                     <Button x:Name="AdBlockToggle" Content="Reklam: AÇIK" Click="AdBlock_Click" ToolTip="Reklam Engelleyici"/>
                     <Button x:Name="WhitelistToggleBtn" Content="🛡️ Muaf Tut" Click="WhitelistToggle_Click" ToolTip="Bu sitede reklam engelleyiciyi kapat"/>
                     <Button Content="Şifreler" Click="Passwords_Click"/>
@@ -173,6 +176,9 @@
             <Border x:Name="LeftSidebar" Grid.Column="0" Background="{DynamicResource SurfaceBrush}"
                     BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0"
                     Visibility="Collapsed">
+                <Border.RenderTransform>
+                    <TranslateTransform x:Name="LeftPanelTransform" X="-230"/>
+                </Border.RenderTransform>
                 <ScrollViewer VerticalScrollBarVisibility="Auto">
                     <StackPanel Margin="8">
                         <Button Content="🛠️ Kevora Tools" Click="OpenKevoraTools_Click" Margin="0,4,0,8" FontWeight="Bold"/>
@@ -186,6 +192,7 @@
                         <Button Content="Çeviri Yap" Click="Translate_Click"/>
                         <Button Content="Görsel Ara" Click="ImageSearch_Click"/>
                         <Button Content="Görsel Dönüştür" Click="ImageConvert_Click"/>
+                        <Button Content="📖 Oku Sonra" Click="SaveReadLater_Click" Margin="0,0,0,4"/>
 
                         <TextBlock Text="Şifre" FontWeight="Bold" Margin="2,12,2,4" FontSize="14"/>
                         <Button Content="Otomatik Doldur" Click="AutoFillPassword_Click"/>
@@ -205,7 +212,10 @@
 
                 <TabControl x:Name="TabStrip" Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2"
                             Background="{DynamicResource BarBrush}" BorderThickness="0"
-                            SelectionChanged="TabStrip_SelectionChanged">
+                            SelectionChanged="TabStrip_SelectionChanged"
+                            AllowDrop="True"
+                            PreviewMouseLeftButtonDown="TabStrip_PreviewMouseLeftButtonDown"
+                            PreviewMouseMove="TabStrip_PreviewMouseMove">
                     <TabControl.Template>
                         <ControlTemplate TargetType="TabControl">
                             <TabPanel IsItemsHost="True" Background="{DynamicResource BarBrush}"/>
@@ -220,9 +230,11 @@
             <Border x:Name="RightPanel" Grid.Column="2" Background="{DynamicResource SurfaceBrush}"
                     BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1,0,0,0"
                     Visibility="Collapsed">
+                <Border.RenderTransform>
+                    <TranslateTransform x:Name="RightPanelTransform" X="300"/>
+                </Border.RenderTransform>
                 <ScrollViewer VerticalScrollBarVisibility="Auto">
                     <StackPanel Margin="8">
-                        
                         <Border Background="{DynamicResource BarBrush}" Padding="8" Margin="0,0,0,8" CornerRadius="4">
                             <StackPanel Orientation="Horizontal">
                                 <Ellipse x:Name="OllamaDot" Width="10" Height="10" Fill="Gray" VerticalAlignment="Center" Margin="0,0,6,0"/>
@@ -255,6 +267,29 @@
                         <TextBlock Text="Sayfa Bilgisi" FontWeight="Bold" Margin="0,8,0,2"/>
                         <TextBlock x:Name="PageInfoText" FontSize="11" TextWrapping="Wrap" Foreground="{DynamicResource MutedForegroundBrush}" Margin="0,0,0,4"/>
                         <TextBlock x:Name="ContextSizeText" FontSize="11" Foreground="{DynamicResource MutedForegroundBrush}" Margin="0,0,0,8"/>
+
+                        <Border Background="{DynamicResource BarBrush}" CornerRadius="8" Padding="10" Margin="0,8,0,8">
+                            <StackPanel>
+                                <TextBlock Text="🛡️ Reklam ve İzleyici Raporu" FontWeight="Bold" Margin="0,0,0,5"/>
+                                <TextBlock x:Name="AdBlockStatsText" Text="Bugün 0 istek engellendi." FontSize="12" Foreground="{DynamicResource MutedForegroundBrush}" Margin="0,0,0,8"/>
+                                
+                                <ListBox x:Name="BlockedListBox" MaxHeight="150" Background="Transparent" BorderThickness="0" FontSize="11">
+                                    <ListBox.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid Margin="0,2">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Text="{Binding Domain}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                                                <TextBlock Grid.Column="1" Text="{Binding Time, StringFormat='HH:mm:ss'}" Foreground="{DynamicResource MutedForegroundBrush}" Margin="6,0,0,0"/>
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ListBox.ItemTemplate>
+                                </ListBox>
+                                <Button Content="Raporu Temizle" Click="ClearBlockedList_Click" Margin="0,8,0,0" FontSize="11"/>
+                            </StackPanel>
+                        </Border>
 
                         <TextBlock Text="Yer İmleri" FontWeight="Bold" Margin="0,8,0,2"/>
                         <ListBox x:Name="BookmarksList" MaxHeight="160" Margin="0,0,0,4" MouseDoubleClick="BookmarksList_DoubleClick"/>
