@@ -149,6 +149,7 @@
                 </StackPanel>
                 <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
                     <Button x:Name="AdBlockToggle" Content="Reklam: AÇIK" Click="AdBlock_Click" ToolTip="Reklam Engelleyici"/>
+                    <Button x:Name="WhitelistToggleBtn" Content="🛡️ Muaf Tut" Click="WhitelistToggle_Click" ToolTip="Bu sitede reklam engelleyiciyi kapat"/>
                     <Button Content="Şifreler" Click="Passwords_Click"/>
                     <Button Content="Uzantılar" Click="Extensions_Click"/>
                     <Button Content="Tema ▾" Click="ThemeMenu_Click" ToolTip="Tema Ayarları"/>
@@ -176,10 +177,6 @@
                     <StackPanel Margin="8">
                         <Button Content="🛠️ Kevora Tools" Click="OpenKevoraTools_Click" Margin="0,4,0,8" FontWeight="Bold"/>
                         
-                        <TextBlock Text="Uzantılar" FontWeight="Bold" Margin="2,4" FontSize="14"/>
-                        <ListBox x:Name="ExtensionsList" Height="120"/>
-                        <Button Content="Uzantıları Yönet" Click="Extensions_Click" Margin="0,4"/>
-
                         <TextBlock Text="Kaydet" FontWeight="Bold" Margin="2,12,2,4" FontSize="14"/>
                         <Button Content="PDF Kaydet" Click="SavePdf_Click"/>
                         <Button Content="HTML Kaydet" Click="SaveHtml_Click"/>
@@ -192,13 +189,6 @@
 
                         <TextBlock Text="Şifre" FontWeight="Bold" Margin="2,12,2,4" FontSize="14"/>
                         <Button Content="Otomatik Doldur" Click="AutoFillPassword_Click"/>
-                        
-                        <TextBlock Text="Kısayollar" FontWeight="Bold" Margin="2,12,2,4" FontSize="14"/>
-                        <ListBox x:Name="ShortcutsList" Height="120" MouseDoubleClick="ShortcutsList_DoubleClick"/>
-                        <StackPanel Orientation="Horizontal">
-                            <Button Content="+ Ekle" Click="AddShortcut_Click"/>
-                            <Button Content="Sil" Click="DeleteShortcut_Click"/>
-                        </StackPanel>
                     </StackPanel>
                 </ScrollViewer>
             </Border>
