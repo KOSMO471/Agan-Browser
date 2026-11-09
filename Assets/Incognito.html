@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <style>
+        :root { --bg: #0A0012; --surface: #1A0A2A; --text: #FFFFFF; --muted: #8A8AA8; --accent: #9D4EDD; --accent2: #C77DFF; --border: #2D1B4E; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: radial-gradient(circle at 50% 30%, #1A0A2A 0%, #0A0012 70%);
+            color: var(--text);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            position: relative;
+        }
+        body::before {
+            content: "";
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: repeating-linear-gradient(
+                0deg,
+                transparent,
+                transparent 2px,
+                rgba(157, 78, 221, 0.03) 2px,
+                rgba(157, 78, 221, 0.03) 4px
+            );
+            pointer-events: none;
+            z-index: 1;
+        }
+        .content {
+            position: relative;
+            z-index: 2;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+            max-width: 700px;
+            padding: 20px;
+        }
+        .glasses {
+            font-size: 100px;
+            margin-bottom: 20px;
+            filter: drop-shadow(0 0 30px rgba(157, 78, 221, 0.6));
+            animation: pulse 3s ease-in-out infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); filter: drop-shadow(0 0 30px rgba(157, 78, 221, 0.6)); }
+            50% { transform: scale(1.05); filter: drop-shadow(0 0 50px rgba(199, 125, 255, 0.9)); }
+        }
+        h1 {
+            font-size: 42px;
+            font-weight: 300;
+            letter-spacing: 4px;
+            margin-bottom: 16px;
+            background: linear-gradient(135deg, var(--accent), var(--accent2));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        h1 span { font-weight: 600; }
+        .subtitle {
+            color: var(--muted);
+            font-size: 16px;
+            margin-bottom: 40px;
+            line-height: 1.6;
+            max-width: 500px;
+        }
+        .features {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            margin-bottom: 40px;
+            width: 100%;
+        }
+        .feature {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 16px;
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            text-align: left;
+        }
+        .feature-icon {
+            font-size: 22px;
+            flex-shrink: 0;
+        }
+        .feature-text {
+            font-size: 13px;
+            line-height: 1.4;
+        }
+        .feature-title {
+            font-weight: 600;
+            color: var(--accent2);
+            margin-bottom: 4px;
+            display: block;
+        }
+        .feature-desc {
+            color: var(--muted);
+        }
+        #searchBox {
+            width: 100%;
+            max-width: 600px;
+            padding: 16px 24px;
+            font-size: 16px;
+            border-radius: 30px;
+            border: 1px solid var(--border);
+            background: var(--surface);
+            color: var(--text);
+            outline: none;
+            transition: border-color 0.3s, box-shadow 0.3s;
+            z-index: 2;
+        }
+        #searchBox:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 20px rgba(157, 78, 221, 0.3);
+        }
+        #searchBox::placeholder { color: var(--muted); }
+        .badge {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 10;
+            background: rgba(157, 78, 221, 0.15);
+            border: 1px solid var(--accent);
+            color: var(--accent2);
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            letter-spacing: 1px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            backdrop-filter: blur(10px);
+        }
+        .badge::before {
+            content: "";
+            width: 8px;
+            height: 8px;
+            background: var(--accent2);
+            border-radius: 50%;
+            animation: blink 1.5s infinite;
+        }
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+    </style>
+</head>
+<body>
+    <div class="badge">GİZLİ MOD AKTİF</div>
+    
+    <div class="content">
+        <div class="glasses">🕶️</div>
+        <h1>Gizli <span>Mod</span></h1>
+        <p class="subtitle">
+            Bu sekmede yaptığın her şey iz bırakmadan silinir. Tarayıcı geçmişi, çerezler ve form verileri kaydedilmez.
+        </p>
+        
+        <div class="features">
+            <div class="feature">
+                <span class="feature-icon">🚫</span>
+                <div class="feature-text">
+                    <span class="feature-title">Geçmiş Yok</span>
+                    <span class="feature-desc">Ziyaret ettiğin sayfalar kaydedilmez</span>
+                </div>
+            </div>
+            <div class="feature">
+                <span class="feature-icon">🍪</span>
+                <div class="feature-text">
+                    <span class="feature-title">Çerez Yok</span>
+                    <span class="feature-desc">Oturum kapandığında her şey silinir</span>
+                </div>
+            </div>
+            <div class="feature">
+                <span class="feature-icon">👁️</span>
+                <div class="feature-text">
+                    <span class="feature-title">İz Bırakmaz</span>
+                    <span class="feature-desc">Bu cihazda iz kalmaz</span>
+                </div>
+            </div>
+            <div class="feature">
+                <span class="feature-icon">⚠️</span>
+                <div class="feature-text">
+                    <span class="feature-title">Dikkat</span>
+                    <span class="feature-desc">İnternet servis sağlayıcın hâlâ görebilir</span>
+                </div>
+            </div>
+        </div>
+        
+        <input id="searchBox" type="text" placeholder="Gizli modda ara veya URL gir..." autofocus>
+    </div>
+    
+    <script>
+        document.getElementById('searchBox').addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && this.value.trim() !== '') {
+                window.chrome.webview.postMessage('navigate:' + this.value.trim());
+            }
+        });
+    </script>
+</body>
+</html>
