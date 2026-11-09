@@ -7,10 +7,19 @@ using System.Text.RegularExpressions;
 
 namespace AganBrowser.Services
 {
+    public class BlockedItem
+    {
+        public string Url { get; set; } = "";
+        public string Domain { get; set; } = "";
+        public DateTime Time { get; set; } = DateTime.Now;
+    }
+
     public static class AdBlockerService
     {
         public static bool IsEnabled { get; set; } = true;
         public static int BlockedCount { get; private set; }
+        public static List<BlockedItem> RecentBlocked { get; } = new();
+        private const int MaxLogSize = 50;
 
         private static readonly HashSet<string> _whitelistDomains = new(StringComparer.OrdinalIgnoreCase);
         private static readonly List<Regex> _blockedRules = new();
@@ -96,6 +105,8 @@ namespace AganBrowser.Services
                         resourceContext.Equals("Iframe", StringComparison.OrdinalIgnoreCase))
                     {
                         BlockedCount++;
+                        RecentBlocked.Add(new BlockedItem { Url = url, Domain = uri.Host });
+                        if (RecentBlocked.Count > MaxLogSize) RecentBlocked.RemoveAt(0);
                         return true;
                     }
                 }
@@ -106,6 +117,8 @@ namespace AganBrowser.Services
                     if (regex.IsMatch(host))
                     {
                         BlockedCount++;
+                        RecentBlocked.Add(new BlockedItem { Url = url, Domain = uri.Host });
+                        if (RecentBlocked.Count > MaxLogSize) RecentBlocked.RemoveAt(0);
                         return true;
                     }
                 }
@@ -130,7 +143,6 @@ namespace AganBrowser.Services
                 foreach (var param in queryParams)
                 {
                     if (string.IsNullOrWhiteSpace(param)) continue;
-                    
                     var parts = param.Split('=');
                     string key = parts[0];
 
@@ -175,12 +187,7 @@ namespace AganBrowser.Services
 
         private static void SaveWhitelist()
         {
-            try
-            {
-                string json = JsonSerializer.Serialize(_whitelistDomains);
-                File.WriteAllText(_whitelistPath, json);
-            }
-            catch { }
+            try { File.WriteAllText(_whitelistPath, JsonSerializer.Serialize(_whitelistDomains)); } catch { }
         }
 
         private static void LoadWhitelist()
@@ -188,12 +195,8 @@ namespace AganBrowser.Services
             if (!File.Exists(_whitelistPath)) return;
             try
             {
-                string json = File.ReadAllText(_whitelistPath);
-                var list = JsonSerializer.Deserialize<List<string>>(json);
-                if (list != null)
-                {
-                    foreach (var d in list) _whitelistDomains.Add(d);
-                }
+                var list = JsonSerializer.Deserialize<List<string>>(File.ReadAllText(_whitelistPath));
+                if (list != null) foreach (var d in list) _whitelistDomains.Add(d);
             }
             catch { }
         }
@@ -226,6 +229,10 @@ namespace AganBrowser.Services
             ";
         }
 
-        public static void Reset() => BlockedCount = 0;
+        public static void Reset() 
+        { 
+            BlockedCount = 0; 
+            RecentBlocked.Clear();
+        }
     }
 }
