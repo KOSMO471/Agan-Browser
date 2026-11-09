@@ -22,7 +22,7 @@ hiçbir veri buluta gönderilmez.
   HTML'ini okuyup adım adım anlatsın
 - **Streaming yanıt** — kelime kelime yazma, sohbet hissi
 - Model seçici (kurulu Ollama modellerini otomatik listeler)
-- Türkçe asistan kişiliği
+- Türkçe asistan kişiliği (Tamamen anonim, kullanıcıdan veri öğrenmez)
 
 ### 🌐 Tarayıcı Çekirdeği
 - Çoklu sekme (yatay / dikey mod)
@@ -34,10 +34,12 @@ hiçbir veri buluta gönderilmez.
 - PDF / HTML olarak sayfa kaydetme
 - DevTools açma
 
-### 🛡️ Reklam Engelleyici
-- 70+ reklam/tracker alan adı engelleme
-- Kozmetik filtreleme (CSS ile reklam kutularını gizleme)
-- Aç/kapa düğmesi, canlı sayaç
+### 🛡️ Agresif Reklam ve İzleyici Engelleyici
+- **Topluluk Listeleri:** EasyList ve EasyPrivacy desteği ile binlerce reklam ağına karşı tam koruma.
+- **Akıllı Filtreleme:** 3. parti zararlı `Script` ve `Iframe`leri otomatik tespit edip engeller.
+- **URL Temizleyici:** `utm_*`, `fbclid` gibi takip parametrelerini sayfa yüklenmeden temizler.
+- **Beyaz Liste:** Sorun çıkaran siteleri tek tıkla "Muaf Tut" butonu ile korumaya alın.
+- **Kozmetik Filtreleme:** CSS ile reklam kutularını gizleme ve canlı engelleme sayacı.
 
 ### 🔐 Şifre Yöneticisi
 - **Windows DPAPI** ile şifrelenmiş kasa (`passwords.dat`)
@@ -47,7 +49,6 @@ hiçbir veri buluta gönderilmez.
 ### 🧩 Uzantı Sistemi
 - WebView2 tarayıcı uzantıları desteği
 - Kurulum: yerleşik klasör, yerel klasör, ZIP, GitHub deposu
-- Örnek uzantı: "Sayfa Bilgisi"
 
 ### 🎨 Arayüz
 - Koyu / Açık tema (anlık geçiş, WebView içeriğine de yansır)
@@ -80,6 +81,25 @@ ollama pull qwen2.5-coder:7b
 
 # 3. Derle
 build.bat
+
+---
+
+## 📅 Sürüm Notları
+
+### v1.1.0 - "Gizlilik ve Hız" Güncellemesi
+Bu sürümde odak noktamız, tarayıcının arka planında çalışan reklam ve izleyici engelleme mekanizmasını çok daha agresif ve akıllı hale getirmek oldu. Ayrıca arayüzdeki gereksiz kalabalıklar temizlendi.
+
+**🛡️ Reklam Engelleyici Artık Çok Daha Güçlü:**
+- **Topluluk Listeleri Desteği:** Kendi sınırlı listemiz yerine, dünyanın en büyük reklam listeleri olan `EasyList` ve `EasyPrivacy` altyapısı eklendi. Binlerce reklam ağı tek bir motorla engelleniyor.
+- **URL Temizleyici (Tracking Strip):** Reklamverenlerin sizi izlemek için kullandığı `utm_source`, `fbclid`, `gclid` gibi parametreler, sayfa yüklenmeden önce URL'den otomatik olarak siliniyor.
+- **Akıllı Kaynak Kontrolü:** Sadece alan adına bakılmıyor; sayfaya dışarıdan yüklenen 3. parti `Script` ve `Iframe`ler özel olarak analiz edilip engelleniyor.
+- **Beyaz Liste (Allowlist):** Reklam engelleyicinin bir siteyi bozması durumunda, üst bara eklenen **"🛡️ Muaf Tut"** butonu ile o site tek tıkla beyaz listeye alınabiliyor. Ayarlar kalıcı olarak saklanıyor.
+
+**🧹 Arayüz ve Performans Temizliği:**
+- Sol paneldeki gereksiz uzantı listesi ve kısayollar kaldırıldı, arayüz sadeleştirildi.
+- Yapay zekanın (Ağan) sizden izinsiz veri öğrenmesini engellemek için arka plandaki "Bilgi Haznesi" ve "Çalışma Alanları" gibi hafıza modülleri tamamen kaldırıldı. Ağan artık tamamen anonim bir asistan.
+- Yapay zekanın yanıt üretirken takılmasına neden olan `AganSystemPrompt` çakışmaları giderildi.
+- Uygulama kapatılırken arka planda "hayalet süreç" kalmasını engelleyen `Environment.Exit` güvencesi eklendi.
 
 # 4. Çalıştır
 run.bat
