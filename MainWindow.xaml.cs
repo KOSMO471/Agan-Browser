@@ -36,7 +36,6 @@ namespace AganBrowser
         private readonly ExtensionService _extensionService = new();
         private readonly PasswordService _passwordService = new();
         private readonly DownloadService _downloadService = new();
-        private readonly ShortcutService _shortcutService = new();
         private readonly SessionService _sessionService = new();
         private readonly BookmarkService _bookmarkService = new();
         private readonly HistoryService _historyService = new();
@@ -55,7 +54,9 @@ namespace AganBrowser
 
         private async void OnLoaded(object sender, RoutedEventArgs e)
         {
-            ShortcutsList.ItemsSource = _shortcutService.Shortcuts;
+            AdBlockerService.LoadRules();
+            AdBlockerService.Reset();
+
             DownloadsMiniList.ItemsSource = _downloadService.Downloads;
             BookmarksList.ItemsSource = _bookmarkService.Bookmarks;
             BookmarksList.DisplayMemberPath = "Name";
@@ -259,6 +260,7 @@ namespace AganBrowser
             core.WebMessageReceived += Core_WebMessageReceived;
             core.NavigationCompleted += Core_NavigationCompleted;
             core.SourceChanged += Core_SourceChanged;
+            core.NavigationStarting += Core_NavigationStarting;
             core.FaviconChanged += Core_FaviconChanged;
             core.ContextMenuRequested += Core_ContextMenuRequested;
             _downloadService.Attach(core);
@@ -476,6 +478,19 @@ namespace AganBrowser
             }
         }
 
+        private void Core_NavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e)
+        {
+            string cleanUrl = AdBlockerService.CleanUrl(e.Uri);
+            if (cleanUrl != e.Uri)
+            {
+                e.Cancel = true;
+                if (sender is CoreWebView2 core)
+                {
+                    core.Navigate(cleanUrl);
+                }
+            }
+        }
+
         private void Core_NavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs e)
         {
             if (sender is not CoreWebView2 core) return;
@@ -563,10 +578,20 @@ namespace AganBrowser
 
         private void Core_WebResourceRequested(object? sender, CoreWebView2WebResourceRequestedEventArgs e)
         {
-            if (!AdBlockerService.ShouldBlock(e.Request.Uri)) return;
+            var core = sender as CoreWebView2;
+            string mainDomain = "";
+            if (core != null)
+            {
+                try { mainDomain = new Uri(core.Source).Host; } catch { }
+            }
+            
+            string context = e.ResourceContext.ToString();
+            
+            if (!AdBlockerService.ShouldBlock(e.Request.Uri, context, mainDomain)) return;
+            
             try
             {
-                var env = (sender as CoreWebView2)?.Environment;
+                var env = core?.Environment;
                 if (env == null) return;
                 e.Response = env.CreateWebResourceResponse(new MemoryStream(), 403, "Blocked", "Content-Type: text/plain");
             }
@@ -632,6 +657,7 @@ namespace AganBrowser
                 webView.CoreWebView2.WebMessageReceived -= Core_WebMessageReceived;
                 webView.CoreWebView2.NavigationCompleted -= Core_NavigationCompleted;
                 webView.CoreWebView2.SourceChanged -= Core_SourceChanged;
+                webView.CoreWebView2.NavigationStarting -= Core_NavigationStarting;
                 webView.CoreWebView2.FaviconChanged -= Core_FaviconChanged;
                 webView.CoreWebView2.ContextMenuRequested -= Core_ContextMenuRequested;
             }
@@ -717,11 +743,42 @@ namespace AganBrowser
             AdBlockToggle.Content = AdBlockerService.IsEnabled ? $"Reklam: AÇIK ({AdBlockerService.BlockedCount})" : "Reklam: KAPALI";
             AdBlockStatus.Text = $"Engellenen: {AdBlockerService.BlockedCount}";
             ZoomText.Text = $"{(int)((_activeWebView?.ZoomFactor ?? 1.0) * 100)}%";
+
+            if (_activeWebView?.CoreWebView2 != null)
+            {
+                string host = "";
+                try { host = new Uri(_activeWebView.CoreWebView2.Source).Host; } catch { }
+                bool isWhitelisted = AdBlockerService.IsWhitelisted(host);
+                WhitelistToggleBtn.Content = isWhitelisted ? "🔓 Muaf (Aç)" : "🛡️ Muaf Tut";
+            }
         }
 
         private void AdBlock_Click(object sender, RoutedEventArgs e)
         {
             AdBlockerService.IsEnabled = !AdBlockerService.IsEnabled;
+            UpdateAdBlockLabel();
+        }
+
+        private void WhitelistToggle_Click(object sender, RoutedEventArgs e)
+        {
+            if (_activeWebView?.CoreWebView2 == null) return;
+            
+            string host = "";
+            try { host = new Uri(_activeWebView.CoreWebView2.Source).Host; } catch { return; }
+            if (string.IsNullOrEmpty(host)) return;
+
+            if (AdBlockerService.IsWhitelisted(host))
+            {
+                AdBlockerService.RemoveFromWhitelist(host);
+                DialogHelper.Info("Reklam Engelleyici", $"{host} adresi beyaz listeden çıkarıldı. Reklamlar tekrar engellenecek.");
+                _activeWebView.CoreWebView2.Reload();
+            }
+            else
+            {
+                AdBlockerService.AddToWhitelist(host);
+                DialogHelper.Info("Reklam Engelleyici", $"{host} adresi beyaz listeye eklendi. Bu sitede reklamlar engellenmeyecek.");
+                _activeWebView.CoreWebView2.Reload();
+            }
             UpdateAdBlockLabel();
         }
 
@@ -773,14 +830,7 @@ namespace AganBrowser
 
         private async Task LoadExtensionsAsync()
         {
-            var manifests = await _extensionService.GetAvailableExtensionsAsync();
-            Dispatcher.Invoke(() =>
-            {
-                ExtensionsList.Items.Clear();
-                var builtIns = _extensionService.GetBuiltInExtensionNames();
-                foreach (var name in builtIns) ExtensionsList.Items.Add($"[Yerleşik] {name}");
-                foreach (var m in manifests) ExtensionsList.Items.Add($"{m.Name} v{m.Version}");
-            });
+            await Task.CompletedTask;
         }
 
         private async void SavePdf_Click(object sender, RoutedEventArgs e)
@@ -908,18 +958,6 @@ namespace AganBrowser
             ActivateTab(tabItem);
             _aganTabItem = tabItem;
         }
-
-        private void AddShortcut_Click(object sender, RoutedEventArgs e)
-        {
-            string? name = DialogHelper.Prompt("Kısayol", "Ad:");
-            if (string.IsNullOrWhiteSpace(name)) return;
-            string? url = DialogHelper.Prompt("Kısayol", "URL:", "https://");
-            if (string.IsNullOrWhiteSpace(url)) return;
-            _shortcutService.Add(new ShortcutItem { Name = name!, Url = url! });
-        }
-
-        private void DeleteShortcut_Click(object sender, RoutedEventArgs e) { if (ShortcutsList.SelectedItem is ShortcutItem s) _shortcutService.Remove(s); }
-        private void ShortcutsList_DoubleClick(object sender, MouseButtonEventArgs e) { if (ShortcutsList.SelectedItem is ShortcutItem s) AddNewTab(s.Url); }
 
         private const string FallbackNewTab = @"<!DOCTYPE html><html><head><meta charset='utf-8'><style>
             body{margin:0;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;background:#1A1A1A;color:#fff;font-family:'Segoe UI',sans-serif;}
