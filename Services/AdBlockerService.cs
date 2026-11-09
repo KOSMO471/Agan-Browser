@@ -16,19 +16,20 @@ namespace AganBrowser.Services
 
     public static class AdBlockerService
     {
-        public static bool IsEnabled { get; set; } = true;
+        public static bool IsEnabled { get; set; } = false;
         public static int BlockedCount { get; private set; }
         public static List<BlockedItem> RecentBlocked { get; } = new();
         private const int MaxLogSize = 50;
 
         private static readonly HashSet<string> _whitelistDomains = new(StringComparer.OrdinalIgnoreCase);
-        private static readonly List<Regex> _blockedRules = new();
+        private static readonly HashSet<string> _blockedDomains = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly List<Regex> _wildcardRules = new();
         private static readonly string _whitelistPath;
 
-        private static readonly string[] _trackingParams = 
-        { 
-            "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", 
-            "fbclid", "gclid", "yclid", "msclkid", "mc_eid", "igshid", "ref_src" 
+        private static readonly string[] _trackingParams =
+        {
+            "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+            "fbclid", "gclid", "yclid", "msclkid", "mc_eid", "igshid", "ref_src"
         };
 
         private static readonly HashSet<string> _fallbackDomains = new(StringComparer.OrdinalIgnoreCase)
@@ -48,28 +49,37 @@ namespace AganBrowser.Services
 
         public static void LoadRules()
         {
-            _blockedRules.Clear();
+            _blockedDomains.Clear();
+            _wildcardRules.Clear();
+
             string listsPath = Path.Combine(AppContext.BaseDirectory, "Assets", "AdblockLists");
             bool foundAnyList = false;
 
             if (Directory.Exists(listsPath))
             {
-                var files = Directory.GetFiles(listsPath, "*.txt");
-                foreach (var file in files)
+                foreach (var file in Directory.GetFiles(listsPath, "*.txt"))
                 {
                     try
                     {
-                        var lines = File.ReadAllLines(file);
-                        foreach (var line in lines)
+                        foreach (var line in File.ReadLines(file))
                         {
                             string rule = line.Trim();
-                            if (string.IsNullOrWhiteSpace(rule) || rule.StartsWith("!") || rule.StartsWith("[")) continue;
-                            
-                            if (rule.StartsWith("||") && rule.EndsWith("^"))
+                            if (string.IsNullOrEmpty(rule) || rule[0] == '!' || rule[0] == '[') continue;
+
+                            if (rule.StartsWith("||") && rule.EndsWith("^") && !rule.Contains('$'))
                             {
-                                string domain = rule.Substring(2, rule.Length - 3).Replace(".", "\\.");
-                                if (domain.Contains("*")) domain = domain.Replace("*", ".*");
-                                _blockedRules.Add(new Regex($"(^|\\.){domain}$", RegexOptions.Compiled | RegexOptions.IgnoreCase));
+                                string domain = rule.Substring(2, rule.Length - 3);
+                                if (string.IsNullOrEmpty(domain)) continue;
+
+                                if (domain.Contains('*'))
+                                {
+                                    string pattern = "(^|\\.)" + Regex.Escape(domain).Replace("\\*", ".*") + "$";
+                                    _wildcardRules.Add(new Regex(pattern, RegexOptions.Compiled | RegexOptions.IgnoreCase));
+                                }
+                                else
+                                {
+                                    _blockedDomains.Add(domain);
+                                }
                             }
                         }
                         foundAnyList = true;
@@ -82,8 +92,7 @@ namespace AganBrowser.Services
             {
                 foreach (var domain in _fallbackDomains)
                 {
-                    string safeDomain = domain.Replace(".", "\\.");
-                    _blockedRules.Add(new Regex($"(^|\\.){safeDomain}$", RegexOptions.Compiled | RegexOptions.IgnoreCase));
+                    _blockedDomains.Add(domain);
                 }
             }
         }
@@ -101,36 +110,57 @@ namespace AganBrowser.Services
 
                 if (!string.IsNullOrEmpty(mainDomain) && !uri.Host.EndsWith(mainDomain, StringComparison.OrdinalIgnoreCase))
                 {
-                    if (resourceContext.Equals("Script", StringComparison.OrdinalIgnoreCase) || 
+                    if (resourceContext.Equals("Script", StringComparison.OrdinalIgnoreCase) ||
                         resourceContext.Equals("Iframe", StringComparison.OrdinalIgnoreCase))
                     {
-                        BlockedCount++;
-                        RecentBlocked.Add(new BlockedItem { Url = url, Domain = uri.Host });
-                        if (RecentBlocked.Count > MaxLogSize) RecentBlocked.RemoveAt(0);
+                        RegisterBlock(url, uri.Host);
                         return true;
                     }
                 }
 
                 string host = uri.Host;
-                foreach (var regex in _blockedRules)
+                string current = host;
+                while (!string.IsNullOrEmpty(current))
                 {
-                    if (regex.IsMatch(host))
+                    if (_blockedDomains.Contains(current))
                     {
-                        BlockedCount++;
-                        RecentBlocked.Add(new BlockedItem { Url = url, Domain = uri.Host });
-                        if (RecentBlocked.Count > MaxLogSize) RecentBlocked.RemoveAt(0);
+                        RegisterBlock(url, uri.Host);
                         return true;
+                    }
+
+                    int dot = current.IndexOf('.');
+                    if (dot < 0) break;
+                    current = current.Substring(dot + 1);
+                }
+
+                if (_wildcardRules.Count > 0)
+                {
+                    foreach (var regex in _wildcardRules)
+                    {
+                        if (regex.IsMatch(host))
+                        {
+                            RegisterBlock(url, uri.Host);
+                            return true;
+                        }
                     }
                 }
             }
             catch { }
+
             return false;
+        }
+
+        private static void RegisterBlock(string url, string host)
+        {
+            BlockedCount++;
+            RecentBlocked.Add(new BlockedItem { Url = url, Domain = host });
+            if (RecentBlocked.Count > MaxLogSize) RecentBlocked.RemoveAt(0);
         }
 
         public static string CleanUrl(string url)
         {
             if (string.IsNullOrEmpty(url)) return url;
-            
+
             try
             {
                 var uri = new Uri(url);
@@ -162,6 +192,7 @@ namespace AganBrowser.Services
                 }
             }
             catch { }
+
             return url;
         }
 
@@ -229,9 +260,9 @@ namespace AganBrowser.Services
             ";
         }
 
-        public static void Reset() 
-        { 
-            BlockedCount = 0; 
+        public static void Reset()
+        {
+            BlockedCount = 0;
             RecentBlocked.Clear();
         }
     }
