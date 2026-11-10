@@ -1,9 +1,0 @@
-{
-  "manifest_version": 3,
-  "name": "Koyu Mod",
-  "version": "1.0",
-  "description": "Aktif sayfayı koyu moda çevirir.",
-  "permissions": ["activeTab", "scripting"],
-  "action": { "default_title": "Koyu Mod Aç/Kapat" },
-  "background": { "service_worker": "background.js" }
-}
