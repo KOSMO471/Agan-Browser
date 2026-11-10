@@ -1,9 +1,0 @@
-{
-  "manifest_version": 3,
-  "name": "Görsel Toplayıcı",
-  "version": "1.1",
-  "description": "Sayfadaki tüm görselleri listeler ve indirir.",
-  "permissions": ["activeTab", "scripting", "downloads", "contextMenus"],
-  "action": { "default_popup": "popup.html", "default_title": "Görselleri Göster" },
-  "background": { "service_worker": "background.js" }
-}
