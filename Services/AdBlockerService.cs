@@ -14,9 +14,25 @@ namespace AganBrowser.Services
         public DateTime Time { get; set; } = DateTime.Now;
     }
 
+    public class AdBlockState
+    {
+        public bool IsEnabled { get; set; } = false;
+    }
+
     public static class AdBlockerService
     {
-        public static bool IsEnabled { get; set; } = false;
+        private static bool _isEnabled = false;
+        public static bool IsEnabled
+        {
+            get => _isEnabled;
+            set
+            {
+                if (_isEnabled == value) return;
+                _isEnabled = value;
+                SaveState();
+            }
+        }
+
         public static int BlockedCount { get; private set; }
         public static List<BlockedItem> RecentBlocked { get; } = new();
         private const int MaxLogSize = 50;
@@ -25,6 +41,7 @@ namespace AganBrowser.Services
         private static readonly HashSet<string> _blockedDomains = new(StringComparer.OrdinalIgnoreCase);
         private static readonly List<Regex> _wildcardRules = new();
         private static readonly string _whitelistPath;
+        private static readonly string _statePath;
 
         private static readonly string[] _trackingParams =
         {
@@ -44,7 +61,9 @@ namespace AganBrowser.Services
             string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "AganBrowser");
             Directory.CreateDirectory(dir);
             _whitelistPath = Path.Combine(dir, "adblock_allowlist.json");
+            _statePath = Path.Combine(dir, "adblock_state.json");
             LoadWhitelist();
+            LoadState();
         }
 
         public static void LoadRules()
@@ -107,16 +126,6 @@ namespace AganBrowser.Services
                 if (uri.Scheme != "http" && uri.Scheme != "https") return false;
 
                 if (IsWhitelisted(uri.Host)) return false;
-
-                if (!string.IsNullOrEmpty(mainDomain) && !uri.Host.EndsWith(mainDomain, StringComparison.OrdinalIgnoreCase))
-                {
-                    if (resourceContext.Equals("Script", StringComparison.OrdinalIgnoreCase) ||
-                        resourceContext.Equals("Iframe", StringComparison.OrdinalIgnoreCase))
-                    {
-                        RegisterBlock(url, uri.Host);
-                        return true;
-                    }
-                }
 
                 string host = uri.Host;
                 string current = host;
@@ -213,7 +222,9 @@ namespace AganBrowser.Services
         public static bool IsWhitelisted(string domain)
         {
             if (string.IsNullOrEmpty(domain)) return false;
-            return _whitelistDomains.Any(d => domain.EndsWith(d, StringComparison.OrdinalIgnoreCase));
+            return _whitelistDomains.Any(d =>
+                domain.Equals(d, StringComparison.OrdinalIgnoreCase) ||
+                domain.EndsWith("." + d, StringComparison.OrdinalIgnoreCase));
         }
 
         private static void SaveWhitelist()
@@ -228,6 +239,22 @@ namespace AganBrowser.Services
             {
                 var list = JsonSerializer.Deserialize<List<string>>(File.ReadAllText(_whitelistPath));
                 if (list != null) foreach (var d in list) _whitelistDomains.Add(d);
+            }
+            catch { }
+        }
+
+        private static void SaveState()
+        {
+            try { File.WriteAllText(_statePath, JsonSerializer.Serialize(new AdBlockState { IsEnabled = _isEnabled })); } catch { }
+        }
+
+        private static void LoadState()
+        {
+            if (!File.Exists(_statePath)) return;
+            try
+            {
+                var state = JsonSerializer.Deserialize<AdBlockState>(File.ReadAllText(_statePath));
+                if (state != null) _isEnabled = state.IsEnabled;
             }
             catch { }
         }
