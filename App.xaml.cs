@@ -4,9 +4,10 @@ namespace AganBrowser
 {
     public partial class App : Application
     {
-        public App()
+        protected override void OnStartup(StartupEventArgs e)
         {
-            Services.ThemeService.Apply("Dark");
+            base.OnStartup(e);
+            Services.ThemeService.Initialize();
         }
     }
 }
