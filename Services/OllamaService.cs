@@ -4,6 +4,7 @@ using System.Net.Http;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using AganBrowser.Models;
 
@@ -23,7 +24,7 @@ namespace AganBrowser.Services
         {
             try
             {
-                using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(3));
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
                 var response = await _httpClient.GetAsync("/api/tags", cts.Token);
                 return response.IsSuccessStatusCode;
             }
@@ -48,7 +49,7 @@ namespace AganBrowser.Services
             return list;
         }
 
-        public async Task ChatStreamAsync(string systemPrompt, string userMessage, Action<string> onChunk)
+        public async Task ChatStreamAsync(string systemPrompt, string userMessage, Action<string> onChunk, CancellationToken cancellationToken = default)
         {
             var request = new ChatRequest
             {
@@ -67,20 +68,21 @@ namespace AganBrowser.Services
                 Content = new StringContent(JsonSerializer.Serialize(request), Encoding.UTF8, "application/json")
             };
 
-            using var response = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead);
+            using var response = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
-                string body = await response.Content.ReadAsStringAsync();
+                string body = await response.Content.ReadAsStringAsync(cancellationToken);
                 onChunk($"[Ollama Hatası: {(int)response.StatusCode} - {body}]");
                 return;
             }
 
-            using var stream = await response.Content.ReadAsStreamAsync();
+            using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
             using var reader = new System.IO.StreamReader(stream);
 
             string? line;
-            while ((line = await reader.ReadLineAsync()) != null)
+            while ((line = await reader.ReadLineAsync(cancellationToken)) != null)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 if (string.IsNullOrWhiteSpace(line)) continue;
                 try
                 {
