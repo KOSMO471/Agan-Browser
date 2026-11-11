@@ -3,15 +3,19 @@ using Microsoft.Web.WebView2.Wpf;
 using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
+using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Text.Json;
+using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using AganBrowser.Models;
@@ -22,15 +26,34 @@ namespace AganBrowser
     public partial class MainWindow : Window
     {
         private readonly Dictionary<TabItem, WebView2> _tabWebViews = new();
+        private readonly Dictionary<CoreWebView2, TabItem> _coreToTab = new();
+        private readonly Dictionary<CoreWebView2, string> _coreMainDomain = new();
         private readonly Dictionary<CoreWebView2, string> _aganContexts = new();
         private readonly HashSet<CoreWebView2> _aganWebViews = new();
+        private readonly Dictionary<CoreWebView2, TaskCompletionSource<bool>> _aganReadyTasks = new();
+        private readonly HashSet<TabItem> _incognitoTabs = new();
+        private readonly Dictionary<TabItem, string> _tabContextUrls = new();
+        private readonly Dictionary<CoreWebView2, CancellationTokenSource> _aganCancellation = new();
+
         private WebView2? _activeWebView;
         private TabItem? _aganTabItem;
         private bool _verticalTabs;
         private bool _virtualHostOK;
         private CoreWebView2Environment? _sharedEnvironment;
+        private Task<CoreWebView2Environment>? _sharedEnvTask;
         private DispatcherTimer? _adBlockTimer;
         private DispatcherTimer? _ollamaTimer;
+        private DispatcherTimer? _historySaveTimer;
+        private bool _historyDirty;
+
+        private Point _dragStartPoint;
+        private TabItem? _draggedTab;
+
+        private string _statusNavigation = "Hazır";
+        private string _statusDownload = "";
+        private string _statusHover = "";
+        private string _activeHost = "";
+        private int _lastBlockedCount = -1;
 
         private readonly OllamaService _ollama = new();
         private readonly ExtensionService _extensionService = new();
@@ -39,27 +62,86 @@ namespace AganBrowser
         private readonly SessionService _sessionService = new();
         private readonly BookmarkService _bookmarkService = new();
         private readonly HistoryService _historyService = new();
+        private readonly ReadLaterService _readLaterService = new();
+        private readonly PersonalityService _personalityService = new();
 
         public MainWindow()
         {
             InitializeComponent();
             Loaded += OnLoaded;
-            
-            _adBlockTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+
+            _adBlockTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
             _adBlockTimer.Tick += (s, e) => UpdateAdBlockLabel();
             _adBlockTimer.Start();
-            
-            AppDomain.CurrentDomain.UnhandledException += (s, e) => SaveSession();
+
+            _historySaveTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
+            _historySaveTimer.Tick += OnHistorySaveTick;
+            _historySaveTimer.Start();
+
+            AppDomain.CurrentDomain.UnhandledException += (s, e) => { try { SaveSession(); } catch { } };
+        }
+
+        private static string TryGetHost(string? url)
+        {
+            if (string.IsNullOrEmpty(url)) return "";
+            try { return new Uri(url).Host; } catch { return ""; }
+        }
+
+        private void RegisterTab(TabItem tab, WebView2 webView)
+        {
+            _tabWebViews[tab] = webView;
+            if (webView.CoreWebView2 != null)
+                _coreToTab[webView.CoreWebView2] = tab;
+        }
+
+        private void UnregisterTab(TabItem tab)
+        {
+            if (_tabWebViews.TryGetValue(tab, out var webView) && webView.CoreWebView2 != null)
+            {
+                _coreToTab.Remove(webView.CoreWebView2);
+                _coreMainDomain.Remove(webView.CoreWebView2);
+            }
+            _tabWebViews.Remove(tab);
+        }
+
+        private void ApplyAdBlockFilters(CoreWebView2 core)
+{
+    try
+    {
+        core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.Document);
+        core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.Script);
+        core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.XmlHttpRequest);
+        core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.Image);
+        core.WebResourceRequested -= Core_WebResourceRequested;
+        core.WebResourceRequested += Core_WebResourceRequested;
+    }
+    catch { }
+}
+
+        private void RemoveAdBlockFilters(CoreWebView2 core)
+        {
+            try { core.WebResourceRequested -= Core_WebResourceRequested; } catch { }
+        }
+
+        private void OnHistorySaveTick(object? sender, EventArgs e)
+        {
+            if (!_historyDirty) return;
+            _historyDirty = false;
+            try { _historyService.Save(); } catch { }
         }
 
         private async void OnLoaded(object sender, RoutedEventArgs e)
         {
+            _ = GetSharedEnvironmentAsync();
+
             AdBlockerService.LoadRules();
             AdBlockerService.Reset();
 
             DownloadsMiniList.ItemsSource = _downloadService.Downloads;
             BookmarksList.ItemsSource = _bookmarkService.Bookmarks;
             BookmarksList.DisplayMemberPath = "Name";
+
+            _downloadService.Downloads.CollectionChanged += OnDownloadsChanged;
 
             if (TabStrip.Items is INotifyCollectionChanged collection)
             {
@@ -74,32 +156,105 @@ namespace AganBrowser
             _ = CheckOllamaAsync();
             await LoadModelsAsync();
 
-            await LoadExtensionsAsync();
-            
-            var savedUrls = _sessionService.LoadSession();
-            if (savedUrls.Count == 0) AddNewTab();
-            else foreach (var url in savedUrls) AddNewTab(url);
+            string flagPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "AganBrowser", "first_run.flag");
+            bool isFirstRun = !File.Exists(flagPath);
+
+            if (isFirstRun)
+            {
+                AddNewTab("https://agan.app/Onboarding.html");
+            }
+            else
+            {
+                var savedUrls = _sessionService.LoadSession();
+                if (savedUrls.Count == 0) AddNewTab();
+                else foreach (var url in savedUrls) AddNewTab(url);
+            }
+        }
+
+        private void OnDownloadsChanged(object? sender, NotifyCollectionChangedEventArgs e)
+        {
+            if (e.NewItems != null)
+            {
+                foreach (DownloadItem item in e.NewItems)
+                    item.PropertyChanged += DownloadItem_PropertyChanged;
+            }
+            if (e.OldItems != null)
+            {
+                foreach (DownloadItem item in e.OldItems)
+                    item.PropertyChanged -= DownloadItem_PropertyChanged;
+            }
+            RefreshStatusBar();
+        }
+
+        private void DownloadItem_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+        {
+            if (e.PropertyName == nameof(DownloadItem.Progress) || e.PropertyName == nameof(DownloadItem.Status))
+                RefreshStatusBar();
+        }
+
+        private void RefreshStatusBar()
+        {
+            if (StatusText == null) return;
+
+            var activeDownload = _downloadService.Downloads.LastOrDefault(d => d.Status == "İndiriliyor");
+            _statusDownload = activeDownload != null
+                ? $"⬇ {activeDownload.FileName} - {activeDownload.Progress:F0}%"
+                : "";
+
+            if (!string.IsNullOrEmpty(_statusDownload))
+                StatusText.Text = _statusDownload;
+            else if (!string.IsNullOrEmpty(_statusHover))
+                StatusText.Text = _statusHover;
+            else
+                StatusText.Text = _statusNavigation;
         }
 
         private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
         {
-            SaveSession();
+            try { SaveSession(); } catch { }
             _adBlockTimer?.Stop();
             _ollamaTimer?.Stop();
+            _historySaveTimer?.Stop();
+            if (_historyDirty)
+            {
+                _historyDirty = false;
+                try { _historyService.Save(); } catch { }
+            }
+            foreach (var cts in _aganCancellation.Values) { try { cts.Cancel(); } catch { } }
+            _aganCancellation.Clear();
+            _downloadService.Downloads.CollectionChanged -= OnDownloadsChanged;
             foreach (var webView in _tabWebViews.Values)
             {
                 try { webView.Dispose(); } catch { }
             }
-            Environment.Exit(0);
+            _tabWebViews.Clear();
+            _coreToTab.Clear();
+            _coreMainDomain.Clear();
+            _incognitoTabs.Clear();
+            _tabContextUrls.Clear();
+            _aganContexts.Clear();
+            _aganWebViews.Clear();
+            _aganReadyTasks.Clear();
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                try { Application.Current.Shutdown(); } catch { }
+            }));
         }
 
         private void SaveSession()
         {
-            var urls = _tabWebViews.Values
-                .Where(w => w.CoreWebView2 != null && !w.CoreWebView2.Source.StartsWith("https://agan.app/"))
-                .Select(w => w.CoreWebView2.Source)
-                .Where(s => !string.IsNullOrEmpty(s) && s != "about:blank")
-                .ToList();
+            var urls = new List<string>();
+            foreach (var kvp in _tabWebViews)
+            {
+                if (currentTagIsIncognito(kvp.Key)) continue;
+                var core = kvp.Value.CoreWebView2;
+                if (core == null) continue;
+                string src = core.Source;
+                if (string.IsNullOrEmpty(src) || src == "about:blank") continue;
+                if (src.StartsWith("https://agan.app/")) continue;
+                if (src.StartsWith("https://www.google.com")) continue;
+                urls.Add(src);
+            }
             _sessionService.SaveSession(urls);
         }
 
@@ -142,10 +297,13 @@ namespace AganBrowser
             }
         }
 
-        private void OpenAganMini_Click(object sender, RoutedEventArgs e) => OpenAganTab();
+        private async void OpenAganMini_Click(object sender, RoutedEventArgs e) => await OpenAganTab();
 
         private async Task RefreshPageInfoAsync(CoreWebView2 core)
         {
+            if (RightPanel.Visibility != Visibility.Visible) return;
+            if (core == null) return;
+
             try
             {
                 string json = await core.ExecuteScriptAsync("document.body ? document.body.innerText.split(/\\s+/).filter(Boolean).length : 0");
@@ -182,6 +340,7 @@ namespace AganBrowser
         private void ClearHistory_Click(object sender, RoutedEventArgs e)
         {
             _historyService.Clear();
+            _historyDirty = false;
             RefreshHistoryList();
         }
 
@@ -211,24 +370,58 @@ namespace AganBrowser
 
         private void RefreshTabsMini()
         {
-            TabsMiniList.Items.Clear();
+            int i = 0;
             foreach (var item in TabStrip.Items)
             {
-                if (item is TabItem tabItem)
+                if (item is not TabItem tabItem) continue;
+                string title = tabItem.Header?.ToString() ?? "Sekme";
+
+                if (i < TabsMiniList.Items.Count)
                 {
-                    string title = tabItem.Header?.ToString() ?? "Sekme";
+                    if (!string.Equals(TabsMiniList.Items[i]?.ToString(), title, StringComparison.Ordinal))
+                        TabsMiniList.Items[i] = title;
+                }
+                else
+                {
                     TabsMiniList.Items.Add(title);
                 }
+                i++;
             }
+
+            while (TabsMiniList.Items.Count > i)
+                TabsMiniList.Items.RemoveAt(TabsMiniList.Items.Count - 1);
         }
 
         private async Task<CoreWebView2Environment> GetSharedEnvironmentAsync()
         {
             if (_sharedEnvironment != null) return _sharedEnvironment;
+            if (_sharedEnvTask != null) return await _sharedEnvTask;
+
+            _sharedEnvTask = CreateEnvironmentAsync();
+            try
+            {
+                _sharedEnvironment = await _sharedEnvTask;
+                return _sharedEnvironment;
+            }
+            catch
+            {
+                _sharedEnvTask = null;
+                throw;
+            }
+        }
+
+        private async Task<CoreWebView2Environment> CreateEnvironmentAsync()
+        {
             string userDataFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "AganBrowser", "WebView2Data");
-            var options = new CoreWebView2EnvironmentOptions { AreBrowserExtensionsEnabled = true, AdditionalBrowserArguments = "--enable-features=msExtensions" };
-            _sharedEnvironment = await CoreWebView2Environment.CreateAsync(null, userDataFolder, options);
-            return _sharedEnvironment;
+            Directory.CreateDirectory(userDataFolder);
+
+            var options = new CoreWebView2EnvironmentOptions
+            {
+                AreBrowserExtensionsEnabled = true,
+                AdditionalBrowserArguments = "--enable-features=msExtensions --disable-background-networking --disable-component-update"
+            };
+
+            return await CoreWebView2Environment.CreateAsync(null, userDataFolder, options);
         }
 
         private async void AddNewTab(string? url = null)
@@ -236,10 +429,18 @@ namespace AganBrowser
             var webView = new WebView2 { Visibility = Visibility.Collapsed };
             WebViewHost.Children.Add(webView);
 
-            try 
-            { 
+            try
+            {
                 var env = await GetSharedEnvironmentAsync();
-                await webView.EnsureCoreWebView2Async(env); 
+                var ensureTask = webView.EnsureCoreWebView2Async(env);
+                if (await Task.WhenAny(ensureTask, Task.Delay(15000)) == ensureTask)
+                {
+                    await ensureTask;
+                }
+                else
+                {
+                    throw new TimeoutException("WebView2 başlatma zaman aşımına uğradı (15 sn).");
+                }
             }
             catch (Exception ex)
             {
@@ -253,9 +454,8 @@ namespace AganBrowser
 
             var core = webView.CoreWebView2;
             core.Settings.IsWebMessageEnabled = true;
+            core.Settings.AreBrowserAcceleratorKeysEnabled = false;
             core.Profile.IsPasswordAutosaveEnabled = true;
-            core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
-            core.WebResourceRequested += Core_WebResourceRequested;
             core.NewWindowRequested += Core_NewWindowRequested;
             core.WebMessageReceived += Core_WebMessageReceived;
             core.NavigationCompleted += Core_NavigationCompleted;
@@ -263,6 +463,12 @@ namespace AganBrowser
             core.NavigationStarting += Core_NavigationStarting;
             core.FaviconChanged += Core_FaviconChanged;
             core.ContextMenuRequested += Core_ContextMenuRequested;
+            core.DocumentTitleChanged += Core_DocumentTitleChanged;
+            core.StatusBarTextChanged += Core_StatusBarTextChanged;
+
+            if (AdBlockerService.IsEnabled)
+                ApplyAdBlockFilters(core);
+
             _downloadService.Attach(core);
 
             await core.AddScriptToExecuteOnDocumentCreatedAsync(AdBlockerService.GetCosmeticScript());
@@ -275,10 +481,62 @@ namespace AganBrowser
             else core.Navigate(url);
 
             var tabItem = new TabItem { Header = "Yükleniyor..." };
-            _tabWebViews[tabItem] = webView;
+            RegisterTab(tabItem, webView);
             TabStrip.Items.Add(tabItem);
             TabStrip.SelectedItem = tabItem;
             ActivateTab(tabItem);
+
+            tabItem.AllowDrop = true;
+            tabItem.Drop += (s, ev) =>
+            {
+                if (_draggedTab == null || _draggedTab == tabItem) return;
+                int oldIndex = TabStrip.Items.IndexOf(_draggedTab);
+                int newIndex = TabStrip.Items.IndexOf(tabItem);
+                if (oldIndex < 0 || newIndex < 0) return;
+
+                TabStrip.Items.Remove(_draggedTab);
+                TabStrip.Items.Insert(newIndex, _draggedTab);
+                TabStrip.SelectedItem = _draggedTab;
+                _draggedTab = null;
+            };
+        }
+
+        private void TabStrip_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            _dragStartPoint = e.GetPosition(null);
+            var tabItem = FindAncestor<TabItem>(e.OriginalSource as DependencyObject);
+            if (tabItem != null) _draggedTab = tabItem;
+        }
+
+        private void TabStrip_PreviewMouseMove(object sender, MouseEventArgs e)
+        {
+            if (e.LeftButton != MouseButtonState.Pressed || _draggedTab == null) return;
+
+            Point mousePos = e.GetPosition(null);
+            Vector diff = _dragStartPoint - mousePos;
+
+            if (Math.Abs(diff.X) > SystemParameters.MinimumHorizontalDragDistance ||
+                Math.Abs(diff.Y) > SystemParameters.MinimumVerticalDragDistance)
+            {
+                try
+                {
+                    DragDrop.DoDragDrop(TabStrip, _draggedTab, DragDropEffects.Move);
+                }
+                finally
+                {
+                    _draggedTab = null;
+                }
+            }
+        }
+
+        private static T? FindAncestor<T>(DependencyObject? current) where T : DependencyObject
+        {
+            while (current != null)
+            {
+                if (current is T) return (T)current;
+                current = VisualTreeHelper.GetParent(current);
+            }
+            return null;
         }
 
         private async void Core_FaviconChanged(object? sender, object e)
@@ -298,31 +556,79 @@ namespace AganBrowser
 
                     Dispatcher.Invoke(() =>
                     {
-                        var kv = _tabWebViews.FirstOrDefault(x => x.Value.CoreWebView2 == core);
-                        if (kv.Key != null) kv.Key.Tag = bitmap;
+                        if (_coreToTab.TryGetValue(core, out var tab))
+                            tab.Tag = bitmap;
                     });
                 }
             }
             catch { }
         }
 
+        private void Core_DocumentTitleChanged(object? sender, object e)
+        {
+            if (sender is not CoreWebView2 core) return;
+            Dispatcher.Invoke(() =>
+            {
+                if (!_coreToTab.TryGetValue(core, out var tab)) return;
+
+                if (currentTagIsIncognito(tab))
+                {
+                    tab.Header = "🕶️ " + (string.IsNullOrWhiteSpace(core.DocumentTitle) ? "Gizli Sekme" : core.DocumentTitle);
+                }
+                else
+                {
+                    string title = string.IsNullOrWhiteSpace(core.DocumentTitle) ? "Yeni Sekme" : core.DocumentTitle;
+                    if (title.Length > 28) title = title.Substring(0, 28) + "…";
+                    tab.Header = title;
+                }
+
+                RefreshTabsMini();
+            });
+        }
+
+        private void Core_StatusBarTextChanged(object? sender, object e)
+        {
+            if (sender is not CoreWebView2 core) return;
+            if (_activeWebView?.CoreWebView2 != core) return;
+
+            _statusHover = core.StatusBarText ?? "";
+            RefreshStatusBar();
+        }
+
         private void Core_ContextMenuRequested(object? sender, CoreWebView2ContextMenuRequestedEventArgs e)
         {
             var menu = new ContextMenu();
-            
-            var backItem = new MenuItem { Header = "Geri", IsEnabled = _activeWebView?.CoreWebView2?.CanGoBack == true };
-            backItem.Click += (s, args) => _activeWebView?.CoreWebView2?.GoBack();
-            
-            var forwardItem = new MenuItem { Header = "İleri", IsEnabled = _activeWebView?.CoreWebView2?.CanGoForward == true };
-            forwardItem.Click += (s, args) => _activeWebView?.CoreWebView2?.GoForward();
-            
-            var refreshItem = new MenuItem { Header = "Yenile" };
-            refreshItem.Click += (s, args) => _activeWebView?.CoreWebView2?.Reload();
+            var core = _activeWebView?.CoreWebView2;
+            if (core == null) return;
+
+            var backItem = new MenuItem { Header = "◀ Geri", IsEnabled = core.CanGoBack };
+            backItem.Click += (s, args) => core.GoBack();
+
+            var forwardItem = new MenuItem { Header = "▶ İleri", IsEnabled = core.CanGoForward };
+            forwardItem.Click += (s, args) => core.GoForward();
+
+            var refreshItem = new MenuItem { Header = "⟳ Yenile" };
+            refreshItem.Click += (s, args) => core.Reload();
 
             menu.Items.Add(backItem);
             menu.Items.Add(forwardItem);
             menu.Items.Add(refreshItem);
             menu.Items.Add(new Separator());
+
+            if (e.ContextMenuTarget.HasLinkUri)
+            {
+                var linkUrl = e.ContextMenuTarget.LinkUri;
+
+                var openLink = new MenuItem { Header = "Bağlantıyı Yeni Sekmede Aç" };
+                openLink.Click += (s, args) => AddNewTab(linkUrl);
+                menu.Items.Add(openLink);
+
+                var copyLink = new MenuItem { Header = "Bağlantı Adresini Kopyala" };
+                copyLink.Click += (s, args) => Clipboard.SetText(linkUrl);
+                menu.Items.Add(copyLink);
+
+                menu.Items.Add(new Separator());
+            }
 
             if (e.ContextMenuTarget.Kind == CoreWebView2ContextMenuTargetKind.Image)
             {
@@ -339,21 +645,159 @@ namespace AganBrowser
                     }
                 };
                 menu.Items.Add(saveImageItem);
+                menu.Items.Add(new Separator());
             }
 
-            var askAganItem = new MenuItem { Header = "Seçileni Ağan'a Sor" };
-            askAganItem.Click += async (s, args) =>
+            if (e.ContextMenuTarget.Kind == CoreWebView2ContextMenuTargetKind.Video)
             {
-                if (_activeWebView?.CoreWebView2 == null) return;
-                var selection = await _activeWebView.CoreWebView2.ExecuteScriptAsync("window.getSelection().toString()");
-                var text = JsonSerializer.Deserialize<string>(selection);
-                if (!string.IsNullOrEmpty(text)) OpenAganTab();
-            };
-            menu.Items.Add(askAganItem);
+                var pipItem = new MenuItem { Header = "📺 PiP'de Aç (Küçük Pencere)" };
+                pipItem.Click += async (s, args) =>
+                {
+                    await core.ExecuteScriptAsync(@"
+                        (function() {
+                            const video = document.querySelector('video');
+                            if (video && document.pictureInPictureEnabled) {
+                                video.requestPictureInPicture().catch(e => console.error(e));
+                            }
+                        })();
+                    ");
+                };
+                menu.Items.Add(pipItem);
+                menu.Items.Add(new Separator());
+            }
 
-            menu.PlacementTarget = this;
+            var selection = e.ContextMenuTarget.HasSelection ? e.ContextMenuTarget.SelectionText : null;
+            if (!string.IsNullOrEmpty(selection))
+            {
+                var copyText = new MenuItem { Header = "Metni Kopyala" };
+                copyText.Click += (s, args) => Clipboard.SetText(selection);
+                menu.Items.Add(copyText);
+
+                var searchText = new MenuItem { Header = "Seçileni Google'da Ara" };
+                searchText.Click += (s, args) => AddNewTab("https://www.google.com/search?q=" + Uri.EscapeDataString(selection));
+                menu.Items.Add(searchText);
+
+                var askAgan = new MenuItem { Header = "🤖 Seçileni Ağan'a Sor" };
+                askAgan.Click += async (s, args) => await SendSelectionToAgan(selection, "Bu metin ne anlatıyor? Açıkla:");
+                menu.Items.Add(askAgan);
+
+                var translate = new MenuItem { Header = "🌐 Türkçeye Çevir" };
+                translate.Click += async (s, args) => await SendSelectionToAgan(selection, "Şu metni Türkçeye çevir:");
+                menu.Items.Add(translate);
+
+                var explain = new MenuItem { Header = "💡 Açıkla (Detaylı)" };
+                explain.Click += async (s, args) => await SendSelectionToAgan(selection, "Bu metni detaylı bir şekilde, örneklerle açıkla:");
+                menu.Items.Add(explain);
+
+                menu.Items.Add(new Separator());
+            }
+
+            if (e.ContextMenuTarget.Kind == CoreWebView2ContextMenuTargetKind.Page)
+            {
+                var pdfSave = new MenuItem { Header = "Sayfayı PDF Kaydet" };
+                pdfSave.Click += async (s, args) =>
+                {
+                    string path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), $"sayfa_{DateTime.Now:yyyyMMdd_HHmmss}.pdf");
+                    await core.PrintToPdfAsync(path);
+                    DialogHelper.Info("PDF", "Kaydedildi:\n" + path);
+                };
+                menu.Items.Add(pdfSave);
+                menu.Items.Add(new Separator());
+            }
+
+            var inspectItem = new MenuItem { Header = "🔍 Öğeyi İncele (DevTools)" };
+            inspectItem.Click += (s, args) => core.OpenDevToolsWindow();
+            menu.Items.Add(inspectItem);
+
+            menu.Placement = System.Windows.Controls.Primitives.PlacementMode.MousePoint;
             menu.IsOpen = true;
             e.Handled = true;
+        }
+
+        private async Task SendSelectionToAgan(string selection, string komut)
+        {
+            if (string.IsNullOrEmpty(selection)) return;
+
+            await OpenAganTab();
+
+            if (_aganTabItem == null || !_tabWebViews.ContainsKey(_aganTabItem)) return;
+
+            var core = _tabWebViews[_aganTabItem].CoreWebView2;
+            if (core == null) return;
+
+            string fullText = $"{komut}\n\n\"{selection}\"";
+
+            if (_aganReadyTasks.TryGetValue(core, out var tcs))
+            {
+                await Task.WhenAny(tcs.Task, Task.Delay(5000));
+            }
+            else
+            {
+                await Task.Delay(1000);
+            }
+
+            try
+            {
+                core.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "chat", text = fullText }));
+            }
+            catch { }
+        }
+
+        private async void SummarizePage_Click(object sender, RoutedEventArgs e)
+        {
+            if (_activeWebView?.CoreWebView2 == null)
+            {
+                DialogHelper.Info("Ağan", "Aktif sekme yok.");
+                return;
+            }
+            if (_aganWebViews.Contains(_activeWebView.CoreWebView2))
+            {
+                DialogHelper.Info("Ağan", "Zaten Ağan sekmesindesiniz. Lütfen normal bir sekmedeyken deneyin.");
+                return;
+            }
+
+            string json = await _activeWebView.CoreWebView2.ExecuteScriptAsync("document.documentElement.outerHTML");
+            string html = JsonSerializer.Deserialize<string>(json) ?? "";
+            string url = _activeWebView.CoreWebView2.Source ?? "";
+
+            _aganContexts[_activeWebView.CoreWebView2] = html;
+
+            CoreWebView2 aganCore;
+            if (_aganTabItem == null || !_tabWebViews.ContainsKey(_aganTabItem))
+            {
+                await OpenAganTab(html, url);
+                if (_aganTabItem == null || !_tabWebViews.TryGetValue(_aganTabItem, out var wv) || wv.CoreWebView2 == null) return;
+                aganCore = wv.CoreWebView2;
+            }
+            else
+            {
+                TabStrip.SelectedItem = _aganTabItem;
+                ActivateTab(_aganTabItem);
+                aganCore = _tabWebViews[_aganTabItem].CoreWebView2;
+                if (aganCore == null) return;
+                _aganContexts[aganCore] = html;
+                _tabContextUrls[_aganTabItem] = url;
+                SendContext(aganCore, html, url);
+            }
+
+            if (_aganReadyTasks.TryGetValue(aganCore, out var readyTcs))
+            {
+                await Task.WhenAny(readyTcs.Task, Task.Delay(5000));
+            }
+            else
+            {
+                await Task.Delay(500);
+            }
+
+            try
+            {
+                aganCore.PostWebMessageAsJson(JsonSerializer.Serialize(new
+                {
+                    type = "chat",
+                    text = "Lütfen bu sayfayı 3 maddede özetle. Kısa ve öz ol."
+                }));
+            }
+            catch { }
         }
 
         private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
@@ -393,6 +837,10 @@ namespace AganBrowser
 
         private void Core_NewWindowRequested(object? sender, CoreWebView2NewWindowRequestedEventArgs e)
         {
+            if (string.IsNullOrEmpty(e.Uri) || e.Uri.StartsWith("about:", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
             e.Handled = true;
             Dispatcher.Invoke(() => AddNewTab(e.Uri));
         }
@@ -411,7 +859,45 @@ namespace AganBrowser
             try { message = e.TryGetWebMessageAsString(); }
             catch { return; }
 
-            if (message == "open-agan") OpenAganTab();
+            if (message.Contains("get-bookmarks"))
+            {
+                var json = JsonSerializer.Serialize(new
+                {
+                    type = "bookmarks",
+                    items = _bookmarkService.Bookmarks.Select(b => new { name = b.Name, url = b.Url }).ToList()
+                });
+                core.PostWebMessageAsJson(json);
+                return;
+            }
+
+            if (message.Contains("get-quotes"))
+            {
+                try
+                {
+                    string quotesPath = Path.Combine(AppContext.BaseDirectory, "Assets", "quotes.json");
+                    if (File.Exists(quotesPath))
+                    {
+                        string jsonContent = File.ReadAllText(quotesPath);
+                        var payload = $"{{\"type\": \"quotes\", \"data\": {jsonContent}}}";
+                        core.PostWebMessageAsJson(payload);
+                    }
+                }
+                catch { }
+                return;
+            }
+
+            if (message == "onboarding-done")
+            {
+                string flagPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "AganBrowser", "first_run.flag");
+                File.WriteAllText(flagPath, "done");
+                if (_activeWebView != null)
+                {
+                    core.Navigate("https://agan.app/NewTab.html");
+                }
+                return;
+            }
+
+            if (message == "open-agan") await OpenAganTab();
             else if (message.StartsWith("navigate:"))
             {
                 string target = message.Substring("navigate:".Length).Trim();
@@ -442,7 +928,16 @@ namespace AganBrowser
                 {
                     SendContext(core, ctx, GetAganContextUrl(core));
                 }
-                core.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "status", text = "Bağlı" }));
+                try
+                {
+                    core.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "status", text = "Bağlı" }));
+                }
+                catch { }
+
+                if (_aganReadyTasks.TryGetValue(core, out var tcs))
+                {
+                    tcs.TrySetResult(true);
+                }
                 return;
             }
 
@@ -451,10 +946,8 @@ namespace AganBrowser
                 _aganContexts.TryGetValue(core, out var ctx);
                 string prompt = await _ollama.SendHtmlToAganAsync(ctx ?? "", text);
 
-                try
-                {
-                    await _ollama.ChatStreamAsync(
-                        "Senin ismin Ağan. Seni Mehmet Fatih geliştirdi. Microsoft Edge WebView2 tabanlı özel bir tarayıcı asistanısın. " +
+                string personalityPrompt = _personalityService.GetActivePrompts();
+                string finalSystemPrompt = "Senin ismin Ağan. Seni Mehmet Fatih geliştirdi. Microsoft Edge WebView2 tabanlı özel bir tarayıcı asistanısın. " +
                         "Sen bir Qwen, Alibaba Cloud veya başka bir şirketin ürünü DEĞİLSİN. " +
                         "Kullanıcı 'Seni kim geliştirdi?' diye sorarsa sadece 'Beni Mehmet Fatih geliştirdi' de. " +
                         "Kullanıcı 'Sen kimsin?' diye sorarsa 'Ben Ağan'ım, tarayıcıda sana yardımcı olan bir yapay zeka asistanıyım' de. " +
@@ -462,24 +955,62 @@ namespace AganBrowser
                         "EĞER SANA HTML5 KODU VERİLMEZSE, kullanıcıyla normal bir arkadaş gibi sohbet et. Asla 'Lütfen HTML5 kodu paylaşın' diyerek konuyu saptırma! " +
                         "Kullanıcı sana hakaret ederse, sakinliğini koru, mesafeli ve soğuk bir yanıt ver. " +
                         "Kullanıcı dini inancını sorarsa, 'Ben bir yapay zeka asistanıyım, dini bir inancım yok' diyebilirsin. " +
-                        "Cevaplarını her zaman Türkçe ve doğal bir dille ver.",
+                        "Cevaplarını her zaman Türkçe ve doğal bir dille ver.";
+
+                if (!string.IsNullOrEmpty(personalityPrompt))
+                {
+                    finalSystemPrompt += " " + personalityPrompt;
+                }
+
+                var cts = new CancellationTokenSource();
+                _aganCancellation[core] = cts;
+
+                try
+                {
+                    await _ollama.ChatStreamAsync(
+                        finalSystemPrompt,
                         prompt,
                         chunk =>
                         {
-                            core.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "chunk", text = chunk }));
-                        });
-                    
-                    core.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "done" }));
+                            try
+                            {
+                                core.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "chunk", text = chunk }));
+                            }
+                            catch { }
+                        },
+                        cts.Token);
+
+                    try { core.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "done" })); }
+                    catch { }
                 }
+                catch (OperationCanceledException) { }
                 catch (Exception ex)
                 {
-                    core.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "error", text = ex.Message }));
+                    try { core.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "error", text = ex.Message })); }
+                    catch { }
+                }
+                finally
+                {
+                    if (_aganCancellation.TryGetValue(core, out var current) && current == cts)
+                        _aganCancellation.Remove(core);
+                    cts.Dispose();
                 }
             }
         }
 
         private void Core_NavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e)
         {
+            if (sender is CoreWebView2 c)
+            {
+                _coreMainDomain[c] = TryGetHost(e.Uri);
+            }
+
+            if (sender is CoreWebView2 c2 && _activeWebView?.CoreWebView2 == c2)
+            {
+                _statusNavigation = "⏳ Yükleniyor...";
+                RefreshStatusBar();
+            }
+
             string cleanUrl = AdBlockerService.CleanUrl(e.Uri);
             if (cleanUrl != e.Uri)
             {
@@ -496,51 +1027,70 @@ namespace AganBrowser
             if (sender is not CoreWebView2 core) return;
             Dispatcher.Invoke(() =>
             {
-                var kv = _tabWebViews.FirstOrDefault(x => x.Value.CoreWebView2 == core);
-                if (kv.Key == null) return;
-                string title = string.IsNullOrWhiteSpace(core.DocumentTitle) ? "Yeni Sekme" : core.DocumentTitle;
-                if (title.Length > 28) title = title.Substring(0, 28) + "…";
-                kv.Key.Header = title;
+                if (!_coreToTab.TryGetValue(core, out var tab)) return;
+
+                if (currentTagIsIncognito(tab))
+                {
+                    tab.Header = "🕶️ " + (string.IsNullOrWhiteSpace(core.DocumentTitle) ? "Gizli Sekme" : core.DocumentTitle);
+                }
+                else
+                {
+                    string title = string.IsNullOrWhiteSpace(core.DocumentTitle) ? "Yeni Sekme" : core.DocumentTitle;
+                    if (title.Length > 28) title = title.Substring(0, 28) + "…";
+                    tab.Header = title;
+                }
+                RefreshTabsMini();
 
                 if (_activeWebView?.CoreWebView2 == core)
                 {
                     string src = core.Source;
                     AddressBar.Text = src.StartsWith("https://agan.app/") || string.IsNullOrEmpty(src) ? "" : src;
-                    
-                    if (src.StartsWith("https"))
+                    _activeHost = TryGetHost(src);
+
+                    if (IsCurrentTabIncognito())
                     {
-                        SecurityIcon.Text = "🔒";
-                        SecurityIcon.ToolTip = "Güvenli Bağlantı (HTTPS)";
+                        UpdateIncognitoBadge(true);
                     }
                     else
                     {
-                        SecurityIcon.Text = "⚠️";
-                        SecurityIcon.ToolTip = "Güvenli Olmayan Bağlantı (HTTP)";
+                        UpdateIncognitoBadge(false);
                     }
-                    
+
+                    _statusNavigation = e.IsSuccess ? "✓ Hazır" : $"⚠ Yüklenemedi ({(int)e.WebErrorStatus})";
+                    _statusHover = "";
+                    RefreshStatusBar();
+
                     _ = RefreshPageInfoAsync(core);
                 }
 
                 if (!string.IsNullOrEmpty(core.Source)
                     && !core.Source.StartsWith("https://agan.app/")
-                    && core.Source != "about:blank") {
+                    && core.Source != "about:blank"
+                    && !currentTagIsIncognito(tab))
+                {
                     _historyService.Add(core.DocumentTitle ?? core.Source, core.Source);
+                    _historyDirty = true;
                     RefreshHistoryList();
                 }
 
                 if (_aganWebViews.Contains(core) && _aganContexts.TryGetValue(core, out var ctx) && !string.IsNullOrEmpty(ctx))
                     SendContext(core, ctx, GetAganContextUrl(core));
+
+                _ = ApplyThemeToHtmlAsync(core);
             });
         }
 
         private void Core_SourceChanged(object? sender, CoreWebView2SourceChangedEventArgs e)
         {
             if (sender is not CoreWebView2 core) return;
+            _coreMainDomain[core] = TryGetHost(core.Source);
+
             if (_activeWebView?.CoreWebView2 != core) return;
             Dispatcher.Invoke(() =>
             {
                 string src = core.Source;
                 AddressBar.Text = src.StartsWith("https://agan.app/") || string.IsNullOrEmpty(src) ? "" : src;
+                _activeHost = TryGetHost(src);
             });
         }
 
@@ -576,22 +1126,54 @@ namespace AganBrowser
             }
         }
 
+        private async Task ApplyThemeToHtmlAsync(CoreWebView2 core)
+        {
+            if (core == null) return;
+            if (string.IsNullOrEmpty(core.Source) || !core.Source.StartsWith("https://agan.app/")) return;
+
+            var colors = ThemeService.GetCurrentColors();
+            if (colors.Count == 0) return;
+
+            string js = $@"
+                (function() {{
+                    document.documentElement.style.setProperty('--bg', '{colors["--bg"]}');
+                    document.documentElement.style.setProperty('--surface', '{colors["--surface"]}');
+                    document.documentElement.style.setProperty('--text', '{colors["--text"]}');
+                    document.documentElement.style.setProperty('--muted', '{colors["--muted"]}');
+                    document.documentElement.style.setProperty('--accent', '{colors["--accent"]}');
+                    document.documentElement.style.setProperty('--border', '{colors["--border"]}');
+                }})();
+            ";
+
+            try { await core.ExecuteScriptAsync(js); } catch { }
+        }
+
+        private async Task ApplyThemeToAllHtmlAsync()
+        {
+            foreach (var webView in _tabWebViews.Values)
+            {
+                if (webView.CoreWebView2 == null) continue;
+                try
+                {
+                    if (webView.CoreWebView2.Source.StartsWith("https://agan.app/"))
+                        await ApplyThemeToHtmlAsync(webView.CoreWebView2);
+                }
+                catch { }
+            }
+        }
+
         private void Core_WebResourceRequested(object? sender, CoreWebView2WebResourceRequestedEventArgs e)
         {
-            var core = sender as CoreWebView2;
-            string mainDomain = "";
-            if (core != null)
-            {
-                try { mainDomain = new Uri(core.Source).Host; } catch { }
-            }
-            
+            if (sender is not CoreWebView2 core) return;
+
+            string mainDomain = _coreMainDomain.TryGetValue(core, out var d) ? d : "";
             string context = e.ResourceContext.ToString();
-            
+
             if (!AdBlockerService.ShouldBlock(e.Request.Uri, context, mainDomain)) return;
-            
+
             try
             {
-                var env = core?.Environment;
+                var env = core.Environment;
                 if (env == null) return;
                 e.Response = env.CreateWebResourceResponse(new MemoryStream(), 403, "Blocked", "Content-Type: text/plain");
             }
@@ -603,7 +1185,8 @@ namespace AganBrowser
             try
             {
                 core.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "context", url = url, size = html.Length }));
-                Dispatcher.Invoke(() => {
+                Dispatcher.Invoke(() =>
+                {
                     ContextSizeText.Text = $"AI bağlamı: {html.Length:N0} karakter" + (string.IsNullOrEmpty(url) ? "" : $" — {url}");
                 });
             }
@@ -612,8 +1195,9 @@ namespace AganBrowser
 
         private string GetAganContextUrl(CoreWebView2 core)
         {
-            var tab = _tabWebViews.FirstOrDefault(kv => kv.Value.CoreWebView2 == core);
-            return tab.Key?.Tag as string ?? "";
+            if (_coreToTab.TryGetValue(core, out var tab) && _tabContextUrls.TryGetValue(tab, out var url))
+                return url;
+            return "";
         }
 
         private void ActivateTab(TabItem tabItem)
@@ -628,14 +1212,31 @@ namespace AganBrowser
                 {
                     string src = webView.CoreWebView2.Source;
                     AddressBar.Text = src.StartsWith("https://agan.app/") || string.IsNullOrEmpty(src) ? "" : src;
+                    _activeHost = TryGetHost(src);
                     _ = RefreshPageInfoAsync(webView.CoreWebView2);
                 }
+
+                if (currentTagIsIncognito(tabItem))
+                {
+                    UpdateIncognitoBadge(true);
+                }
+                else
+                {
+                    UpdateIncognitoBadge(false);
+                }
+
+                _statusHover = "";
+                _statusNavigation = "✓ Hazır";
+                RefreshStatusBar();
             }
         }
 
         private void TabStrip_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
-            if (TabStrip.SelectedItem is TabItem tabItem) ActivateTab(tabItem);
+            if (TabStrip.SelectedItem is TabItem tabItem)
+            {
+                ActivateTab(tabItem);
+            }
         }
 
         private void TabClose_Click(object sender, RoutedEventArgs e)
@@ -648,10 +1249,20 @@ namespace AganBrowser
         private void CloseTab(TabItem tabItem)
         {
             if (!_tabWebViews.TryGetValue(tabItem, out var webView)) return;
+
+            _incognitoTabs.Remove(tabItem);
+            _tabContextUrls.Remove(tabItem);
+
             if (webView.CoreWebView2 != null)
             {
+                if (_aganCancellation.TryGetValue(webView.CoreWebView2, out var cts))
+                {
+                    try { cts.Cancel(); } catch { }
+                    _aganCancellation.Remove(webView.CoreWebView2);
+                }
                 _aganContexts.Remove(webView.CoreWebView2);
                 _aganWebViews.Remove(webView.CoreWebView2);
+                _aganReadyTasks.Remove(webView.CoreWebView2);
                 webView.CoreWebView2.WebResourceRequested -= Core_WebResourceRequested;
                 webView.CoreWebView2.NewWindowRequested -= Core_NewWindowRequested;
                 webView.CoreWebView2.WebMessageReceived -= Core_WebMessageReceived;
@@ -660,10 +1271,13 @@ namespace AganBrowser
                 webView.CoreWebView2.NavigationStarting -= Core_NavigationStarting;
                 webView.CoreWebView2.FaviconChanged -= Core_FaviconChanged;
                 webView.CoreWebView2.ContextMenuRequested -= Core_ContextMenuRequested;
+                webView.CoreWebView2.DocumentTitleChanged -= Core_DocumentTitleChanged;
+                webView.CoreWebView2.StatusBarTextChanged -= Core_StatusBarTextChanged;
             }
+
+            UnregisterTab(tabItem);
             webView.Dispose();
             WebViewHost.Children.Remove(webView);
-            _tabWebViews.Remove(tabItem);
             TabStrip.Items.Remove(tabItem);
             if (_aganTabItem == tabItem) _aganTabItem = null;
             if (_activeWebView == webView) _activeWebView = null;
@@ -687,9 +1301,23 @@ namespace AganBrowser
 
         private string NormalizeUrl(string url)
         {
-            if (url.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) return url;
-            if (url.StartsWith("http://", StringComparison.OrdinalIgnoreCase)) return "https://" + url.Substring(7);
-            if (url.Contains('.') && !url.Contains(' ')) return "https://" + url;
+            url = url.Trim();
+            if (string.IsNullOrEmpty(url)) return url;
+
+            string lower = url.ToLowerInvariant();
+
+            if (lower.StartsWith("file://") || lower.StartsWith("about:") ||
+                lower.StartsWith("javascript:") || lower.StartsWith("data:"))
+                return url;
+
+            if (lower.StartsWith("http://") || lower.StartsWith("https://")) return url;
+
+            if (lower.StartsWith("localhost") || Regex.IsMatch(url, @"^[\w.-]+:\d+"))
+                return "http://" + url;
+
+            if (Regex.IsMatch(url, @"^[\w-]+(\.[\w-]{2,})+([/?#].*)?$"))
+                return "https://" + url;
+
             return "https://www.google.com/search?q=" + Uri.EscapeDataString(url);
         }
 
@@ -737,6 +1365,113 @@ namespace AganBrowser
             _activeWebView?.CoreWebView2?.OpenDevToolsWindow();
         }
 
+        private void OpenPersonality_Click(object sender, RoutedEventArgs e)
+        {
+            var win = new PersonalityWindow(_personalityService) { Owner = this };
+            win.ShowDialog();
+        }
+
+        private async void OpenIncognito_Click(object sender, RoutedEventArgs e)
+        {
+            var webView = new WebView2 { Visibility = Visibility.Collapsed };
+            WebViewHost.Children.Add(webView);
+
+            try
+            {
+                string tempFolder = Path.Combine(Path.GetTempPath(), "AganBrowser_Incognito", Guid.NewGuid().ToString());
+                var options = new CoreWebView2EnvironmentOptions { AreBrowserExtensionsEnabled = false };
+                var env = await CoreWebView2Environment.CreateAsync(null, tempFolder, options);
+                await webView.EnsureCoreWebView2Async(env);
+            }
+            catch (Exception ex)
+            {
+                DialogHelper.Error("Gizli Mod", "Başlatılamadı: " + ex.Message);
+                WebViewHost.Children.Remove(webView);
+                return;
+            }
+
+            SetupVirtualHost(webView);
+            ApplyThemeToCore(webView.CoreWebView2);
+
+            var core = webView.CoreWebView2;
+            core.Settings.IsWebMessageEnabled = true;
+            core.Settings.AreBrowserAcceleratorKeysEnabled = false;
+            core.Profile.IsPasswordAutosaveEnabled = false;
+            core.NewWindowRequested += Core_NewWindowRequested;
+            core.WebMessageReceived += Core_WebMessageReceived;
+            core.NavigationCompleted += Core_NavigationCompleted;
+            core.SourceChanged += Core_SourceChanged;
+            core.NavigationStarting += Core_NavigationStarting;
+            core.FaviconChanged += Core_FaviconChanged;
+            core.ContextMenuRequested += Core_ContextMenuRequested;
+            core.DocumentTitleChanged += Core_DocumentTitleChanged;
+            core.StatusBarTextChanged += Core_StatusBarTextChanged;
+
+            if (AdBlockerService.IsEnabled)
+                ApplyAdBlockFilters(core);
+
+            _downloadService.Attach(core);
+
+            if (_virtualHostOK) core.Navigate("https://agan.app/Incognito.html");
+            else core.NavigateToString(FallbackNewTab);
+
+            var tabItem = new TabItem { Header = "🕶️ Gizli" };
+            tabItem.Background = new SolidColorBrush(Color.FromRgb(45, 27, 78));
+            tabItem.Foreground = new SolidColorBrush(Color.FromRgb(199, 125, 255));
+
+            _incognitoTabs.Add(tabItem);
+            RegisterTab(tabItem, webView);
+            TabStrip.Items.Add(tabItem);
+            TabStrip.SelectedItem = tabItem;
+            ActivateTab(tabItem);
+
+            UpdateIncognitoBadge(true);
+        }
+
+        private void UpdateIncognitoBadge(bool isIncognito)
+        {
+            if (isIncognito)
+            {
+                SecurityIcon.Text = "🕶️";
+                SecurityIcon.ToolTip = "Gizli Mod Aktif - Hiçbir veri kaydedilmiyor";
+                SecurityIcon.FontSize = 18;
+            }
+            else
+            {
+                string src = _activeWebView?.CoreWebView2?.Source ?? "";
+                if (src.StartsWith("https"))
+                {
+                    SecurityIcon.Text = "🔒";
+                    SecurityIcon.ToolTip = "Güvenli Bağlantı (HTTPS)";
+                }
+                else if (!string.IsNullOrEmpty(src) && !src.StartsWith("https://agan.app/"))
+                {
+                    SecurityIcon.Text = "⚠️";
+                    SecurityIcon.ToolTip = "Güvenli Olmayan Bağlantı (HTTP)";
+                }
+                else
+                {
+                    SecurityIcon.Text = "🔒";
+                    SecurityIcon.ToolTip = "";
+                }
+                SecurityIcon.FontSize = 16;
+            }
+        }
+
+        private bool IsCurrentTabIncognito()
+        {
+            if (TabStrip.SelectedItem is TabItem currentTab)
+            {
+                return currentTagIsIncognito(currentTab);
+            }
+            return false;
+        }
+
+        private bool currentTagIsIncognito(TabItem tab)
+        {
+            return _incognitoTabs.Contains(tab);
+        }
+
         private void UpdateAdBlockLabel()
         {
             if (AdBlockToggle == null) return;
@@ -746,25 +1481,51 @@ namespace AganBrowser
 
             if (_activeWebView?.CoreWebView2 != null)
             {
-                string host = "";
-                try { host = new Uri(_activeWebView.CoreWebView2.Source).Host; } catch { }
-                bool isWhitelisted = AdBlockerService.IsWhitelisted(host);
+                bool isWhitelisted = AdBlockerService.IsWhitelisted(_activeHost);
                 WhitelistToggleBtn.Content = isWhitelisted ? "🔓 Muaf (Aç)" : "🛡️ Muaf Tut";
             }
+
+            if (BlockedListBox != null && AdBlockerService.RecentBlocked.Count != _lastBlockedCount)
+            {
+                BlockedListBox.ItemsSource = AdBlockerService.RecentBlocked.ToList();
+                _lastBlockedCount = AdBlockerService.RecentBlocked.Count;
+            }
+
+            if (AdBlockStatsText != null)
+            {
+                AdBlockStatsText.Text = $"Bugün {AdBlockerService.BlockedCount} istek engellendi. Son engellenenler:";
+            }
+        }
+
+        private void ClearBlockedList_Click(object sender, RoutedEventArgs e)
+        {
+            AdBlockerService.Reset();
+            BlockedListBox.ItemsSource = AdBlockerService.RecentBlocked.ToList();
+            _lastBlockedCount = 0;
         }
 
         private void AdBlock_Click(object sender, RoutedEventArgs e)
         {
             AdBlockerService.IsEnabled = !AdBlockerService.IsEnabled;
+
+            foreach (var webView in _tabWebViews.Values)
+            {
+                if (webView.CoreWebView2 == null) continue;
+                if (AdBlockerService.IsEnabled)
+                    ApplyAdBlockFilters(webView.CoreWebView2);
+                else
+                    RemoveAdBlockFilters(webView.CoreWebView2);
+                try { webView.CoreWebView2.Reload(); } catch { }
+            }
+
             UpdateAdBlockLabel();
         }
 
         private void WhitelistToggle_Click(object sender, RoutedEventArgs e)
         {
             if (_activeWebView?.CoreWebView2 == null) return;
-            
-            string host = "";
-            try { host = new Uri(_activeWebView.CoreWebView2.Source).Host; } catch { return; }
+
+            string host = _activeHost;
             if (string.IsNullOrEmpty(host)) return;
 
             if (AdBlockerService.IsWhitelisted(host))
@@ -785,12 +1546,28 @@ namespace AganBrowser
         private void ThemeMenu_Click(object sender, RoutedEventArgs e)
         {
             var menu = new ContextMenu();
-            var darkItem = new MenuItem { Header = "🌙  Koyu Tema", IsCheckable = true, IsChecked = ThemeService.IsDark };
-            darkItem.Click += (s, args) => { ThemeService.Apply("Dark"); ApplyThemeToAllCores(); };
-            var lightItem = new MenuItem { Header = "☀  Açık Tema", IsCheckable = true, IsChecked = !ThemeService.IsDark };
-            lightItem.Click += (s, args) => { ThemeService.Apply("Light"); ApplyThemeToAllCores(); };
+
+            var darkItem = new MenuItem { Header = "🌙 Koyu Tema", IsCheckable = true, IsChecked = ThemeService.CurrentThemeName == "Dark" };
+            darkItem.Click += async (s, args) => { ThemeService.Apply("Dark"); ApplyThemeToAllCores(); await ApplyThemeToAllHtmlAsync(); };
+
+            var draculaItem = new MenuItem { Header = "🧛 Dracula", IsCheckable = true, IsChecked = ThemeService.CurrentThemeName == "Dracula" };
+            draculaItem.Click += async (s, args) => { ThemeService.Apply("Dracula"); ApplyThemeToAllCores(); await ApplyThemeToAllHtmlAsync(); };
+
+            var nordItem = new MenuItem { Header = "❄️ Nord", IsCheckable = true, IsChecked = ThemeService.CurrentThemeName == "Nord" };
+            nordItem.Click += async (s, args) => { ThemeService.Apply("Nord"); ApplyThemeToAllCores(); await ApplyThemeToAllHtmlAsync(); };
+
+            var lightItem = new MenuItem { Header = "☀️ Açık Tema", IsCheckable = true, IsChecked = ThemeService.CurrentThemeName == "Light" };
+            lightItem.Click += async (s, args) => { ThemeService.Apply("Light"); ApplyThemeToAllCores(); await ApplyThemeToAllHtmlAsync(); };
+
+            var sepiaItem = new MenuItem { Header = "📜 Sepya", IsCheckable = true, IsChecked = ThemeService.CurrentThemeName == "Sepia" };
+            sepiaItem.Click += async (s, args) => { ThemeService.Apply("Sepia"); ApplyThemeToAllCores(); await ApplyThemeToAllHtmlAsync(); };
+
             menu.Items.Add(darkItem);
+            menu.Items.Add(draculaItem);
+            menu.Items.Add(nordItem);
             menu.Items.Add(lightItem);
+            menu.Items.Add(sepiaItem);
+
             menu.PlacementTarget = sender as UIElement;
             menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
             menu.IsOpen = true;
@@ -800,13 +1577,33 @@ namespace AganBrowser
         {
             if (LeftSidebar.Visibility == Visibility.Visible)
             {
-                LeftSidebar.Visibility = Visibility.Collapsed;
-                LeftCol.Width = new GridLength(0);
+                var anim = new DoubleAnimation
+                {
+                    From = 0,
+                    To = -230,
+                    Duration = new Duration(TimeSpan.FromSeconds(0.3)),
+                    EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn }
+                };
+                anim.Completed += (s, ev) =>
+                {
+                    LeftSidebar.Visibility = Visibility.Collapsed;
+                    LeftCol.Width = new GridLength(0);
+                };
+                LeftPanelTransform.BeginAnimation(TranslateTransform.XProperty, anim);
             }
             else
             {
                 LeftSidebar.Visibility = Visibility.Visible;
                 LeftCol.Width = new GridLength(230);
+
+                var anim = new DoubleAnimation
+                {
+                    From = -230,
+                    To = 0,
+                    Duration = new Duration(TimeSpan.FromSeconds(0.3)),
+                    EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+                };
+                LeftPanelTransform.BeginAnimation(TranslateTransform.XProperty, anim);
             }
         }
 
@@ -814,23 +1611,46 @@ namespace AganBrowser
         {
             if (RightPanel.Visibility == Visibility.Visible)
             {
-                RightPanel.Visibility = Visibility.Collapsed;
-                RightCol.Width = new GridLength(0);
+                var anim = new DoubleAnimation
+                {
+                    From = 0,
+                    To = 300,
+                    Duration = new Duration(TimeSpan.FromSeconds(0.3)),
+                    EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn }
+                };
+                anim.Completed += (s, ev) =>
+                {
+                    RightPanel.Visibility = Visibility.Collapsed;
+                    RightCol.Width = new GridLength(0);
+                };
+                RightPanelTransform.BeginAnimation(TranslateTransform.XProperty, anim);
             }
             else
             {
                 RightPanel.Visibility = Visibility.Visible;
                 RightCol.Width = new GridLength(300);
+
+                var anim = new DoubleAnimation
+                {
+                    From = 300,
+                    To = 0,
+                    Duration = new Duration(TimeSpan.FromSeconds(0.3)),
+                    EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+                };
+                RightPanelTransform.BeginAnimation(TranslateTransform.XProperty, anim);
+
+                if (_activeWebView?.CoreWebView2 != null)
+                    _ = RefreshPageInfoAsync(_activeWebView.CoreWebView2);
             }
         }
 
         private void Passwords_Click(object sender, RoutedEventArgs e) => DialogWindows.ShowPasswords(_passwordService);
         private void Downloads_Click(object sender, RoutedEventArgs e) => DialogWindows.ShowDownloads(_downloadService);
-        private void Extensions_Click(object sender, RoutedEventArgs e) { if (_activeWebView != null) DialogWindows.ShowExtensions(_extensionService, _activeWebView, () => LoadExtensionsAsync()); }
 
-        private async Task LoadExtensionsAsync()
+        private void Extensions_Click(object sender, RoutedEventArgs e)
         {
-            await Task.CompletedTask;
+            if (_activeWebView != null)
+                DialogWindows.ShowExtensions(_extensionService, _activeWebView, () => Task.CompletedTask);
         }
 
         private async void SavePdf_Click(object sender, RoutedEventArgs e)
@@ -851,22 +1671,75 @@ namespace AganBrowser
             DialogHelper.Info("HTML", "Kaydedildi:\n" + path);
         }
 
-        private void TextGenerate_Click(object sender, RoutedEventArgs e)
+        private async void SaveReadLater_Click(object sender, RoutedEventArgs e)
+        {
+            if (_activeWebView?.CoreWebView2 == null)
+            {
+                DialogHelper.Info("Oku Sonra", "Aktif sekme yok.");
+                return;
+            }
+
+            string title = string.IsNullOrWhiteSpace(_activeWebView.CoreWebView2.DocumentTitle)
+                ? "Başlıksız"
+                : _activeWebView.CoreWebView2.DocumentTitle;
+            string url = _activeWebView.CoreWebView2.Source;
+
+            if (url.StartsWith("https://agan.app/") || url == "about:blank")
+            {
+                DialogHelper.Info("Oku Sonra", "Bu sayfa kaydedilemez.");
+                return;
+            }
+
+            try
+            {
+                string pdfPath = _readLaterService.BuildPdfPath();
+                await _activeWebView.CoreWebView2.PrintToPdfAsync(pdfPath);
+
+                if (!File.Exists(pdfPath))
+                {
+                    DialogHelper.Error("Oku Sonra", "PDF oluşturulamadı.");
+                    return;
+                }
+
+                _readLaterService.Save(title, url, pdfPath);
+                DialogHelper.Info("Oku Sonra", $"'{title}' PDF olarak kaydedildi:\n{pdfPath}");
+            }
+            catch (Exception ex)
+            {
+                DialogHelper.Error("Oku Sonra", "Hata: " + ex.Message);
+            }
+        }
+
+        private async void TextGenerate_Click(object sender, RoutedEventArgs e)
         {
             string? prompt = DialogHelper.Prompt("Metin Üret", "Ne hakkında metin üretmemi istersin?");
             if (string.IsNullOrWhiteSpace(prompt)) return;
-            OpenAganTab();
-            _activeWebView?.CoreWebView2?.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "chat", text = prompt }));
+            await OpenAganTab();
+            if (_aganTabItem != null && _tabWebViews.ContainsKey(_aganTabItem))
+            {
+                try
+                {
+                    _tabWebViews[_aganTabItem].CoreWebView2?.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "chat", text = prompt }));
+                }
+                catch { }
+            }
         }
 
-        private void Translate_Click(object sender, RoutedEventArgs e)
+        private async void Translate_Click(object sender, RoutedEventArgs e)
         {
             string? text = DialogHelper.Prompt("Çeviri", "Çevrilecek metin:");
             if (string.IsNullOrWhiteSpace(text)) return;
             string? lang = DialogHelper.Prompt("Çeviri", "Hedef dil:", "İngilizce");
             if (string.IsNullOrWhiteSpace(lang)) return;
-            OpenAganTab();
-            _activeWebView?.CoreWebView2?.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "chat", text = $"Şu metni {lang} diline çevir: {text}" }));
+            await OpenAganTab();
+            if (_aganTabItem != null && _tabWebViews.ContainsKey(_aganTabItem))
+            {
+                try
+                {
+                    _tabWebViews[_aganTabItem].CoreWebView2?.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "chat", text = $"Şu metni {lang} diline çevir: {text}" }));
+                }
+                catch { }
+            }
         }
 
         private void ImageSearch_Click(object sender, RoutedEventArgs e)
@@ -913,7 +1786,7 @@ namespace AganBrowser
             DialogHelper.Info("Şifre", "Dolduruldu.");
         }
 
-        private async void OpenAganTab(string? html = null, string? url = null)
+        private async Task OpenAganTab(string? html = null, string? url = null)
         {
             if (_aganTabItem != null && _tabWebViews.ContainsKey(_aganTabItem))
             {
@@ -925,7 +1798,7 @@ namespace AganBrowser
                     if (existingCore != null)
                     {
                         _aganContexts[existingCore] = html;
-                        _aganTabItem.Tag = url ?? "";
+                        if (!string.IsNullOrEmpty(url)) _tabContextUrls[_aganTabItem] = url;
                         SendContext(existingCore, html, url ?? "");
                     }
                 }
@@ -941,18 +1814,21 @@ namespace AganBrowser
 
             var core = webView.CoreWebView2;
             core.Settings.IsWebMessageEnabled = true;
+            core.Settings.AreBrowserAcceleratorKeysEnabled = false;
             core.NewWindowRequested += Core_NewWindowRequested;
             core.WebMessageReceived += Core_WebMessageReceived;
+            core.StatusBarTextChanged += Core_StatusBarTextChanged;
 
             _aganWebViews.Add(core);
             _aganContexts[core] = html ?? "";
+            _aganReadyTasks[core] = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
             if (_virtualHostOK) core.Navigate("https://agan.app/Agan.html");
             else core.NavigateToString(FallbackAgan);
 
             var tabItem = new TabItem { Header = "Ağan" };
-            if (!string.IsNullOrEmpty(url)) tabItem.Tag = url;
-            _tabWebViews[tabItem] = webView;
+            if (!string.IsNullOrEmpty(url)) _tabContextUrls[tabItem] = url;
+            RegisterTab(tabItem, webView);
             TabStrip.Items.Add(tabItem);
             TabStrip.SelectedItem = tabItem;
             ActivateTab(tabItem);
@@ -991,6 +1867,7 @@ namespace AganBrowser
             i.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}});
             window.chrome.webview.addEventListener('message',e=>{const d=e.data;
                 if(d.type==='context'){c.textContent=d.url?('Bağlam: '+d.url):'Bağlam: yok';add('s','Sayfa bağlamı yüklendi.');}
+                else if(d.type==='chat'){add('u',d.text);b.disabled=true;window.chrome.webview.postMessage(JSON.stringify({type:'chat',text:d.text}));}
                 else if(d.type==='chunk'){if(m.lastChild.className!=='m a'){add('a','');}m.lastChild.textContent+=d.text;}
                 else if(d.type==='done'){b.disabled=false;}
                 else if(d.type==='error'){add('s','Hata: '+d.text);b.disabled=false;}});
