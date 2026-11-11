@@ -51,14 +51,46 @@ namespace AganBrowser.Services
             return result;
         }
 
-        public static void Info(string title, string text)
-        {
-            MessageBox.Show(text, title, MessageBoxButton.OK, MessageBoxImage.Information);
-        }
+        public static void Info(string title, string text) => ShowMessage(title, text, false);
 
-        public static void Error(string title, string text)
+        public static void Error(string title, string text) => ShowMessage(title, text, true);
+
+        private static void ShowMessage(string title, string message, bool isError)
         {
-            MessageBox.Show(text, title, MessageBoxButton.OK, MessageBoxImage.Error);
+            var window = new Window
+            {
+                Title = title,
+                Width = 440,
+                Height = 210,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Owner = Application.Current.MainWindow,
+                Background = (Brush)Application.Current.Resources["SurfaceBrush"],
+                Foreground = (Brush)Application.Current.Resources["ForegroundBrush"]
+            };
+            var panel = new StackPanel { Margin = new Thickness(16) };
+            panel.Children.Add(new TextBlock
+            {
+                Text = message,
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = (Brush)Application.Current.Resources["ForegroundBrush"],
+                FontSize = 13,
+                Margin = new Thickness(0, 0, 0, 12)
+            });
+            var btn = new Button
+            {
+                Content = "Tamam",
+                Width = 90,
+                IsDefault = true,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Background = (Brush)Application.Current.Resources["ButtonBrush"],
+                Foreground = (Brush)Application.Current.Resources["ForegroundBrush"],
+                BorderBrush = (Brush)Application.Current.Resources["BorderBrush"],
+                Padding = new Thickness(8, 4, 8, 4)
+            };
+            btn.Click += (s, e) => window.DialogResult = true;
+            panel.Children.Add(btn);
+            window.Content = panel;
+            window.ShowDialog();
         }
     }
 }
