@@ -36,12 +36,6 @@ namespace AganBrowser.Models
         public OllamaOptions Options { get; set; } = new OllamaOptions();
     }
 
-    public class ChatResponse
-    {
-        [JsonPropertyName("message")]
-        public ChatMessage Message { get; set; } = new ChatMessage();
-    }
-
     public class OllamaTagResponse
     {
         [JsonPropertyName("models")]
